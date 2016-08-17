@@ -52,7 +52,7 @@
 //
 // OBJC_PROPERTY(ContextName, PropertyName, OptionalTypeKind)
 //
-//   Describes the optionality if the type of the Objective C property.
+//   Describes the optionality if the type of the Objective-C property.
 //
 
 #ifndef INSTANCE_METHOD
@@ -88,7 +88,7 @@ CLASS_METHOD(NSObject, (0, "class"), Unavailable("use 'self' instead"))
 
 // NSObject protocol
 PROTOCOL_INSTANCE_METHOD(NSObject, (0, "class"),
-                         Unavailable("use 'dynamicType' instead"))
+                         Unavailable("use 'type(of:)' instead"))
 
 START_MODULE(Foundation)
 INSTANCE_METHOD(NSArray, (0, "init"), DesignatedInit)

@@ -1,8 +1,8 @@
-// RUN: %target-swift-frontend %s -S -g -o - | FileCheck %s
+// RUN: %target-swift-frontend %s -S -g -o - | %FileCheck %s
 
 // XFAIL: linux
 
-func markUsed<T>(t: T) {}
+func markUsed<T>(_ t: T) {}
 var a = 1
 var b = 2
 markUsed(a+b)

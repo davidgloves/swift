@@ -1,9 +1,9 @@
-// RUN: not %target-swift-frontend -dump-parse %s 2>&1 | FileCheck %s
-// RUN: not %target-swift-frontend -dump-ast %s 2>&1 | FileCheck %s -check-prefix=CHECK-AST
+// RUN: not %target-swift-frontend -dump-parse %s 2>&1 | %FileCheck %s
+// RUN: not %target-swift-frontend -dump-ast %s 2>&1 | %FileCheck %s -check-prefix=CHECK-AST
 
 // CHECK-LABEL: (func_decl "foo(_:)"
 // CHECK-AST-LABEL: (func_decl "foo(_:)"
-func foo(n: Int) -> Int {
+func foo(_ n: Int) -> Int {
   // CHECK:   (brace_stmt
   // CHECK:     (return_stmt
   // CHECK:       (integer_literal_expr type='<null>' value=42)))

@@ -1,4 +1,5 @@
 .. @raise litre.TestsAreMissing
+.. highlight:: none
 
 Swift Intermediate Language (SIL)
 =================================
@@ -109,13 +110,13 @@ IR.
   functions. Then it rewrites all specialized usages of the generic
   to a direct call of the appropriate specialized function.
 - **Witness and VTable Devirtualization** for a given type looks up
-  the associated method from a class's vtable or a types witness table
+  the associated method from a class's vtable or a type witness table
   and replaces the indirect virtual call with a call to the mapped
   function.
 - **Performance Inlining**
 - **Reference Counting Optimizations**
 - **Memory Promotion/Optimizations**
-- **High-level domain specific optimizations** The swift compiler implements
+- **High-level domain specific optimizations** The Swift compiler implements
   high-level optimizations on basic Swift containers such as Array or String.
   Domain specific optimizations require a defined interface between
   the standard library and the optimizer. More details can be found here:
@@ -152,7 +153,7 @@ Here is an example of a ``.sil`` file::
   }
 
   // Declare a Swift function. The body is ignored by SIL.
-  func taxicabNorm(a:Point) -> Double {
+  func taxicabNorm(_ a:Point) -> Double {
     return a.x + a.y
   }
 
@@ -299,27 +300,27 @@ formal type.  For example, consider the following generic type:
 would normally lower to the type ``@callee_owned () -> Int``, i.e.
 returning its result directly.  But if that type is properly lowered
 with the pattern of its unsubstituted type ``() -> T``, it becomes
-``@callee_owned (@out Int) -> ()``.
+``@callee_owned () -> @out Int``.
 
 When a type is lowered using the abstraction pattern of an
 unrestricted type, it is lowered as if the pattern were replaced with
 a type sharing the same structure but replacing all materializable
 types with fresh type variables.
 
-For example, if ``g`` has type ``Generator<(Int,Int) -> Float>``, ``g.fn`` is
-lowered using the pattern ``() -> T``, which eventually causes ``(Int,Int)
+For example, if ``g`` has type ``Generator<(Int, Int) -> Float>``, ``g.fn`` is
+lowered using the pattern ``() -> T``, which eventually causes ``(Int, Int)
 -> Float`` to be lowered using the pattern ``T``, which is the same as
 lowering it with the pattern ``U -> V``; the result is that ``g.fn``
 has the following lowered type::
 
-  @callee_owned () -> @owned @callee_owned (@out Float, @in (Int,Int)) -> ().
+  @callee_owned () -> @owned @callee_owned (@in (Int, Int)) -> @out Float.
 
 As another example, suppose that ``h`` has type
-``Generator<(Int, @inout Int) -> Float>``.  Neither ``(Int, @inout Int)``
-nor ``@inout Int`` are potential results of substitution because they
+``Generator<(Int, inout Int) -> Float>``.  Neither ``(Int, inout Int)``
+nor ``inout Int`` are potential results of substitution because they
 aren't materializable, so ``h.fn`` has the following lowered type::
 
-  @callee_owned () -> @owned @callee_owned (@out Float, @in Int, @inout Int)
+  @callee_owned () -> @owned @callee_owned (@in Int, @inout Int) -> @out Float
 
 This system has the property that abstraction patterns are preserved
 through repeated substitutions.  That is, you can consider a lowered
@@ -417,11 +418,10 @@ number of ways:
   - Otherwise, the context value is treated as an unowned direct
     parameter.
 
-- A SIL function type declares the conventions for its parameters,
-  including any implicit out-parameters.  The parameters are written
-  as an unlabelled tuple; the elements of that tuple must be legal SIL
-  types, optionally decorated with one of the following convention
-  attributes.
+- A SIL function type declares the conventions for its parameters.
+  The parameters are written as an unlabelled tuple; the elements of that
+  tuple must be legal SIL types, optionally decorated with one of the
+  following convention attributes.
 
   The value of an indirect parameter has type ``*T``; the value of a
   direct parameter has type ``T``.
@@ -450,11 +450,6 @@ number of ways:
     aliases however can be assumed to be well-typed and well-ordered; ill-typed
     accesses and data races to the parameter are still undefined.
 
-  - An ``@out`` parameter is indirect.  The address must be of an
-    uninitialized object; the function is responsible for initializing
-    a value there.  If there is an ``@out`` parameter, it must be
-    the first parameter, and the direct result must be ``()``.
-
   - An ``@owned`` parameter is an owned direct parameter.
 
   - A ``@guaranteed`` parameter is a guaranteed direct parameter.
@@ -465,12 +460,35 @@ number of ways:
 
   - Otherwise, the parameter is an unowned direct parameter.
 
-- A SIL function type declares the convention for its direct result.
-  The result must be a legal SIL type.
+- A SIL function type declares the conventions for its results.
+  The results are written as an unlabelled tuple; the elements of that
+  tuple must be legal SIL types, optionally decorated with one of the
+  following convention attributes.  Indirect and direct results may
+  be interleaved.
+
+  Indirect results correspond to implicit arguments of type ``*T`` in
+  function entry blocks and in the arguments to ``apply`` and ``try_apply``
+  instructions.  These arguments appear in the order in which they appear
+  in the result list, always before any parameters.
+
+  Direct results correspond to direct return values of type ``T``.  A 
+  SIL function type has a ``return type`` derived from its direct results
+  in the following way: when there is a single direct result, the return
+  type is the type of that result; otherwise, it is the tuple type of the
+  types of all the direct results, in the order they appear in the results
+  list.  The return type is the type of the operand of ``return``
+  instructions, the type of ``apply`` instructions, and the type of
+  the normal result of ``try_apply`` instructions.
+
+  - An ``@out`` result is indirect.  The address must be of an
+    uninitialized object.  The function is required to leave an
+    initialized value there unless it terminates with a ``throw``
+    instruction or it has a non-Swift calling convention.
 
   - An ``@owned`` result is an owned direct result.
 
   - An ``@autoreleased`` result is an autoreleased direct result.
+    If there is an autoreleased result, it must be the only direct result.
 
   - Otherwise, the parameter is an unowned direct result.
 
@@ -643,7 +661,7 @@ types. Function types are transformed in order to encode additional attributes:
 
 - The **fully uncurried representation** of the function type, with
   all of the curried argument clauses flattened into a single argument
-  clause. For instance, a curried function ``func foo(x:A)(y:B) -> C``
+  clause. For instance, a curried function ``func foo(_ x:A)(y:B) -> C``
   might be emitted as a function of type ``((y:B), (x:A)) -> C``.  The
   exact representation depends on the function's `calling
   convention`_, which determines the exact ordering of currying
@@ -743,6 +761,7 @@ Basic Blocks
   sil-argument ::= sil-value-name ':' sil-type
 
   sil-instruction-def ::= (sil-value-name '=')? sil-instruction
+                          (',' sil-loc)? (',' sil-scope-ref)?
 
 A function body consists of one or more basic blocks that correspond
 to the nodes of the function's control flow graph. Each basic block
@@ -781,6 +800,30 @@ are bound by the function's caller::
     %3 = tuple ()
     return %3 : $()
   }
+
+
+Debug Information
+~~~~~~~~~~~~~~~~~
+::
+
+  sil-scope-ref ::= 'scope' [0-9]+
+  sil-scope ::= 'sil_scope' [0-9]+ '{'
+                   sil-loc
+                   'parent' scope-parent
+                   ('inlined_at' sil-scope-ref)?
+                '}'
+  scope-parent ::= sil-function-name ':' sil-type
+  scope-parent ::= sil-scope-ref
+  sil-loc ::= 'loc' string-literal ':' [0-9]+ ':' [0-9]+
+
+Each instruction may have a debug location and a SIL scope reference
+at the end.  Debug locations consist of a filename, a line number, and
+a column number.  If the debug location is omitted, it defaults to the
+location in the SIL source file.  SIL scopes describe the position
+inside the lexical scope structure that the Swift expression a SIL
+instruction was generated from had originally. SIL scopes also hold
+inlining information.
+
 
 Declaration References
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -823,14 +866,14 @@ entity discriminators:
 - ``ivarinitializer``: a class's ivar initializer
 - ``defaultarg.``\ *n*: the default argument-generating function for
   the *n*\ -th argument of a Swift ``func``
-- ``foreign``: a specific entry point for C/objective-C interoperability
+- ``foreign``: a specific entry point for C/Objective-C interoperability
 
 Methods and curried function definitions in Swift also have multiple
 "uncurry levels" in SIL, representing the function at each possible
 partial application level. For a curried function declaration::
 
   // Module example
-  func foo(x:A)(y:B)(z:C) -> D
+  func foo(_ x:A)(y:B)(z:C) -> D
 
 The declaration references and types for the different uncurry levels are as
 follows::
@@ -1047,11 +1090,10 @@ instances. Derived classes inherit the witness tables of their base class.
 Witness tables are keyed by *protocol conformance*, which is a unique identifier
 for a concrete type's conformance to a protocol.
 
-- A *normal protocol conformance*
-  names a (potentially unbound generic) type, the protocol it conforms to, and
-  the module in which the type or extension declaration that provides the
-  conformance appears. These correspond 1:1 to protocol conformance declarations
-  in the source code.
+- A *normal protocol conformance* names a (potentially unbound generic) type,
+  the protocol it conforms to, and the module in which the type or extension
+  declaration that provides the conformance appears. These correspond 1:1 to
+  protocol conformance declarations in the source code.
 - If a derived class conforms to a protocol through inheritance from its base
   class, this is represented by an *inherited protocol conformance*, which
   simply references the protocol conformance for the base class.
@@ -1086,6 +1128,55 @@ Witness tables consist of the following entries:
 - *Associated type protocol entries* map a protocol requirement on an associated
   type to the protocol conformance that satisfies that requirement for the
   associated type.
+
+Default Witness Tables
+~~~~~~~~~~~~~~~~~~~~~~
+::
+
+  decl ::= sil-default-witness-table
+  sil-default-witness-table ::= 'sil_default_witness_table'
+                                identifier minimum-witness-table-size
+                                '{' sil-default-witness-entry* '}'
+  minimum-witness-table-size ::= integer
+
+SIL encodes requirements with resilient default implementations in a default
+witness table. We say a requirement has a resilient default implementation if
+the following conditions hold:
+
+- The requirement has a default implementation
+- The requirement is either the last requirement in the protocol, or all
+  subsequent requirements also have resilient default implementations
+
+The set of requirements with resilient default implementations is stored in
+protocol metadata.
+
+The minimum witness table size is the size of the witness table, in words,
+not including any requirements with resilient default implementations.
+
+Any conforming witness table must have a size between the minimum size, and
+the maximum size, which is equal to the minimum size plus the number of
+default requirements.
+
+At load time, if the runtime encounters a witness table with fewer than the
+maximum number of witnesses, the witness table is copied, with default
+witnesses copied in. This ensures that callers can always expect to find
+the correct number of requirements in each witness table, and new
+requirements can be added by the framework author, without breaking client
+code, as long as the new requirements have resilient default implementations.
+
+Default witness tables are keyed by the protocol itself. Only protocols with
+public visibility need a default witness table; private and internal protocols
+are never seen outside the module, therefore there are no resilience issues
+with adding new requirements.
+
+::
+
+  sil-default-witness-entry ::= 'method' sil-decl-ref ':' sil-function-name
+
+Default witness tables currently contain only one type of entry:
+
+- *Method entries* map a method requirement of the protocol to a SIL function
+  that implements that method in a manner suitable for all witness types.
 
 Global Variables
 ~~~~~~~~~~~~~~~~
@@ -1126,8 +1217,8 @@ flow, such as a non-``Void`` function failing to ``return`` a value, or a
 ``switch`` statement failing to cover all possible values of its subject.
 The guaranteed dead code elimination pass can eliminate truly unreachable
 basic blocks, or ``unreachable`` instructions may be dominated by applications
-of ``@noreturn`` functions. An ``unreachable`` instruction that survives
-guaranteed DCE and is not immediately preceded by a ``@noreturn``
+of functions returning uninhabited types. An ``unreachable`` instruction that
+survives guaranteed DCE and is not immediately preceded by a no-return
 application is a dataflow error.
 
 Runtime Failure
@@ -1179,14 +1270,14 @@ Tuples in the input type of the function are recursively destructured into
 separate arguments, both in the entry point basic block of the callee, and
 in the ``apply`` instructions used by callers::
 
-  func foo(x:Int, y:Int)
+  func foo(_ x:Int, y:Int)
   
   sil @foo : $(x:Int, y:Int) -> () {
   entry(%x : $Int, %y : $Int):
     ...
   }
 
-  func bar(x:Int, y:(Int, Int))
+  func bar(_ x:Int, y:(Int, Int))
 
   sil @bar : $(x:Int, y:(Int, Int)) -> () {
   entry(%x : $Int, %y0 : $Int, %y1 : $Int):
@@ -1211,7 +1302,7 @@ in the ``apply`` instructions used by callers::
 Calling a function with trivial value types as inputs and outputs
 simply passes the arguments by value. This Swift function::
 
-  func foo(x:Int, y:Float) -> UnicodeScalar
+  func foo(_ x:Int, y:Float) -> UnicodeScalar
 
   foo(x, y)
 
@@ -1236,7 +1327,7 @@ same way. This Swift function::
 
   class A {}
 
-  func bar(x:A) -> (Int, A) { ... }
+  func bar(_ x:A) -> (Int, A) { ... }
 
   bar(x)
 
@@ -1265,7 +1356,7 @@ returning. This Swift function::
 
    @API struct A {}
 
-  func bas(x:A, y:Int) -> A { return x }
+  func bas(_ x:A, y:Int) -> A { return x }
 
   var z = bas(x, y)
   // ... use z ...
@@ -1291,7 +1382,7 @@ individually according to the above convention. This Swift function::
 
   @API struct A {}
 
-  func zim(x:Int, y:A, (z:Int, w:(A, Int)))
+  func zim(_ x:Int, y:A, (z:Int, w:(A, Int)))
 
   zim(x, y, (z, w))
 
@@ -1315,7 +1406,7 @@ Variadic Arguments
 Variadic arguments and tuple elements are packaged into an array and passed as
 a single array argument. This Swift function::
 
-  func zang(x:Int, (y:Int, z:Int...), v:Int, w:Int...)
+  func zang(_ x:Int, (y:Int, z:Int...), v:Int, w:Int...)
 
   zang(x, (y, z0, z1), v, w0, w1, w2)
 
@@ -1334,7 +1425,7 @@ each "uncurry level" of the function. When a function is uncurried, its
 outermost argument clauses are combined into a tuple in right-to-left order.
 For the following declaration::
 
-  func curried(x:A)(y:B)(z:C)(w:D) -> Int {}
+  func curried(_ x:A)(y:B)(z:C)(w:D) -> Int {}
 
 The types of the SIL entry points are as follows::
 
@@ -1357,7 +1448,7 @@ getter prior to calling the function and to write back to the property
 on return by loading from the buffer and invoking the setter with the final
 value. This Swift function::
 
-  func inout(x:@inout Int) {
+  func inout(_ x: inout Int) {
     x = 1
   }
 
@@ -1380,7 +1471,7 @@ as the inner argument clause(s). When uncurried, the "self" argument is thus
 passed last::
 
   struct Foo {
-    func method(x:Int) -> Int {}
+    func method(_ x:Int) -> Int {}
   }
 
   sil @Foo_method_1 : $((x : Int), @inout Foo) -> Int { ... }
@@ -1448,15 +1539,16 @@ Class TBAA
 
 Class instances and other *heap object references* are pointers at the
 implementation level, but unlike SIL addresses, they are first class values and
-can be ``capture``-d and alias. Swift, however, is memory-safe and statically
+can be ``capture``-d and aliased. Swift, however, is memory-safe and statically
 typed, so aliasing of classes is constrained by the type system as follows:
 
 * A ``Builtin.NativeObject`` may alias any native Swift heap object,
   including a Swift class instance, a box allocated by ``alloc_box``,
   or a thick function's closure context.
   It may not alias natively Objective-C class instances.
-* A ``Builtin.UnknownObject`` may alias any class instance, whether Swift or
-  Objective-C, but may not alias non-class-instance heap objects.
+* A ``Builtin.UnknownObject`` or ``Builtin.BridgeObject`` may alias
+  any class instance, whether Swift or Objective-C, but may not alias
+  non-class-instance heap objects.
 * Two values of the same class type ``$C`` may alias. Two values of related
   class type ``$B`` and ``$D``, where there is a subclass relationship between
   ``$B`` and ``$D``, may alias. Two values of unrelated class types may not
@@ -1470,6 +1562,15 @@ typed, so aliasing of classes is constrained by the type system as follows:
   potentially alias concrete instances of the generic type, such as
   ``$C<Int>``, because ``Int`` is a potential substitution for ``T``.
 
+A violation of the above aliasing rules only results in undefined
+behavior if the aliasing references are dereferenced within Swift code.
+For example,
+``_SwiftNativeNS[Array|Dictionary|String]`` classes alias with
+``NS[Array|Dictionary|String]`` classes even though they are not
+statically related. Since Swift never directly accesses stored
+properties on the Foundation classes, this aliasing does not pose a
+danger.
+
 Typed Access TBAA
 ~~~~~~~~~~~~~~~~~
 
@@ -1481,15 +1582,86 @@ Define a *typed access* of an address or reference as one of the following:
   typed projection operation (e.x. ``ref_element_addr``,
   ``tuple_element_addr``).
 
-It is undefined behavior to perform a typed access to an address or reference if
-the stored object or referent is not an allocated object of the relevant type.
+With limited exceptions, it is undefined behavior to perform a typed access to
+an address or reference addressed memory is not bound to the relevant type.
 
-This allows the optimizer to assume that two addresses cannot alias if there
-does not exist a substitution of archetypes that could cause one of the types to
-be the type of a subobject of the other. Additionally, this applies to the types
-of the values from which the addresses were derived, ignoring "blessed"
-alias-introducing operations such as ``pointer_to_address``, the ``bitcast``
-intrinsic, and the ``inttoptr`` intrinsic.
+This allows the optimizer to assume that two addresses cannot alias if
+there does not exist a substitution of archetypes that could cause one
+of the types to be the type of a subobject of the other. Additionally,
+this applies to the types of the values from which the addresses were
+derived via a typed projection.
+
+Consider the following SIL::
+
+  struct Element {
+    var i: Int
+  }
+  struct S1 {
+    var elt: Element
+  }   
+  struct S2 {
+    var elt: Element
+  }   
+  %adr1 = struct_element_addr %ptr1 : $*S1, #S.elt
+  %adr2 = struct_element_addr %ptr2 : $*S2, #S.elt
+
+The optimizer may assume that ``%adr1`` does not alias with ``%adr2``
+because the values that the addresses are derived from (``%ptr1`` and
+``%ptr2``) have unrelated types. However, in the following example,
+the optimizer cannot assume that ``%adr1`` does not alias with
+``%adr2`` because ``%adr2`` is derived from a cast, and any subsequent
+typed operations on the address will refer to the common ``Element`` type::
+
+  %adr1 = struct_element_addr %ptr1 : $*S1, #S.elt
+  %adr2 = pointer_to_address %ptr2 : $Builtin.RawPointer to $*Element
+
+Exceptions to typed access TBAA rules are only allowed for blessed
+alias-introducing operations. This permits limited type-punning. The only
+current exception is the non-struct ``pointer_to_address`` variant. The
+optimizer must be able to defensively determine that none of the *roots* of an
+address are alias-introducing operations. An address root is the operation that
+produces the address prior to applying any typed projections, indexing, or
+casts. The following are valid address roots:
+
+* Object allocation that generates an address, such as ``alloc_stack``
+  and ``alloc_box``.
+
+* Address-type function arguments. These are crucially *not* considered
+  alias-introducing operations. It is illegal for the SIL optimizer to
+  form a new function argument from an arbitrary address-type
+  value. Doing so would require the optimizer to guarantee that the
+  new argument is both has a non-alias-introducing address root and
+  can be properly represented by the calling convention (address types
+  do not have a fixed representation).
+
+* A strict cast from an untyped pointer, ``pointer_to_address [strict]``. It is
+  illegal for ``pointer_to_address [strict]`` to derive its address from an
+  alias-introducing operation's value. A type punned address may only be
+  produced from an opaque pointer via a non-strict ``pointer_to_address`` at the
+  point of conversion.
+
+Address-to-address casts, via ``unchecked_addr_cast``, transparently
+forward their source's address root, just like typed projections.
+
+Address-type basic block arguments can be conservatively considered
+aliasing-introducing operations; they are uncommon enough not to
+matter and may eventually be prohibited altogether.
+
+Although some pointer producing intrinsics exist, they do not need to be
+considered alias-introducing exceptions to TBAA rules. ``Builtin.inttoptr``
+produces a ``Builtin.RawPointer`` which is not interesting because by definition
+it may alias with everything. Similarly, the LLVM builtins ``Builtin.bitcast``
+and ``Builtin.trunc|sext|zextBitCast`` cannot produce typed pointers. These
+pointer values must be converted to an address via ``pointer_to_address`` before
+typed access can occur. Whether the ``pointer_to_address`` is strict determines
+whether aliasing may occur.
+
+Memory may be rebound to an unrelated type. Addresses to unrelated types may
+alias as long as typed access only occurs while memory is bound to the relevant
+type. Consequently, the optimizer cannot outright assume that addresses accessed
+as unrelated types are nonaliasing. For example, pointer comparison cannot be
+eliminated simply because the two addresses derived from those pointers are
+accessed as unrelated types at different program points.
 
 Value Dependence
 ----------------
@@ -2150,6 +2322,20 @@ index_raw_pointer
 Given a ``Builtin.RawPointer`` value ``%0``, returns a pointer value at the
 byte offset ``%1`` relative to ``%0``.
 
+bind_memory
+```````````
+
+::
+
+  sil-instruction ::= 'bind_memory' sil-operand ',' sil-operand 'to' sil-type
+
+  bind_memory %0 : $Builtin.RawPointer, %1 : $Builtin.Word to $T
+  // %0 must be of $Builtin.RawPointer type
+  // %1 must be of $Builtin.Word type
+
+Binds memory at ``Builtin.RawPointer`` value ``%0`` to type ``$T`` with enough
+capacity to hold ``%1`` values. See SE-0107: UnsafeRawPointer.
+   
 Reference Counting
 ~~~~~~~~~~~~~~~~~~
 
@@ -2209,6 +2395,21 @@ If the release operation brings the strong reference count of the object to
 zero, the object is destroyed and ``@weak`` references are cleared.  When both
 its strong and unowned reference counts reach zero, the object's memory is
 deallocated.
+
+set_deallocating
+````````````````
+::
+
+  set_deallocating %0 : $T
+  // $T must be a reference type.
+
+Explicitly sets the state of the object referenced by ``%0`` to deallocated.
+This is the same operation what's done by a strong_release immediately before
+it calls the deallocator of the object.
+
+It is expected that the strong reference count of the object is one.
+Furthermore, no other thread may increment the strong reference count during
+execution of this instruction.
 
 strong_retain_unowned
 `````````````````````
@@ -2285,6 +2486,16 @@ This operation must be atomic with respect to the final ``strong_release`` on
 the operand (source) heap object.  It need not be atomic with respect to
 ``store_weak`` or ``load_weak`` operations on the same address.
 
+load_unowned
+````````````
+
+TODO: Fill this in
+
+store_unowned
+`````````````
+
+TODO: Fill this in
+
 fix_lifetime
 ````````````
 
@@ -2325,6 +2536,16 @@ the same.  Transformations should be somewhat forgiving here.
 The second operand may have either object or address type.  In the
 latter case, the dependency is on the current value stored in the
 address.
+
+strong_pin
+``````````
+
+TODO: Fill me in!
+
+strong_unpin
+````````````
+
+TODO: Fill me in!
 
 is_unique
 `````````
@@ -2371,6 +2592,36 @@ copy_block
 Performs a copy of an Objective-C block. Unlike retains of other
 reference-counted types, this can produce a different value from the operand
 if the block is copied from the stack to the heap.
+
+builtin "unsafeGuaranteed"
+``````````````````````````
+
+::
+
+  sil-instruction := 'builtin' '"unsafeGuaranteed"' '<' sil-type '>' '(' sil-operand')' ':' sil-type
+
+  %1 = builtin "unsafeGuaranteed"<T>(%0 : $T) : ($T, Builtin.Int1)
+  // $T must be of AnyObject type.
+
+Asserts that there exists another reference of the value ``%0`` for the scope
+delineated by the call of this builtin up to the first call of a ``builtin
+"unsafeGuaranteedEnd"`` instruction that uses the second element ``%1.1`` of the
+returned value. If no such instruction can be found nothing can be assumed. This
+assertions holds for uses of the first tuple element of the returned value
+``%1.0`` within this scope. The returned reference value equals the input
+``%0``.
+
+builtin "unsafeGuaranteedEnd"
+`````````````````````````````
+
+::
+
+  sil-instruction := 'builtin' '"unsafeGuaranteedEnd"' '(' sil-operand')'
+
+  %1 = builtin "unsafeGuaranteedEnd"(%0 : $Builtin.Int1)
+  // $T must be of AnyObject type.
+
+Ends the scope for the ``builtin "unsafeGuaranteed"`` instruction.
 
 Literals
 ~~~~~~~~
@@ -2678,7 +2929,7 @@ to register arguments. This should be fixed.
 This instruction is used to implement both curry thunks and closures. A
 curried function in Swift::
 
-  func foo(a:A)(b:B)(c:C)(d:D) -> E { /* body of foo */ }
+  func foo(_ a:A)(b:B)(c:C)(d:D) -> E { /* body of foo */ }
 
 emits curry thunks in SIL as follows (retains and releases omitted for
 clarity)::
@@ -2714,8 +2965,8 @@ clarity)::
 A local function in Swift that captures context, such as ``bar`` in the
 following example::
 
-  func foo(x:Int) -> Int {
-    func bar(y:Int) -> Int {
+  func foo(_ x:Int) -> Int {
+    func bar(_ y:Int) -> Int {
       return x + y
     }
     return bar(1)
@@ -3260,7 +3511,7 @@ container may use one of several representations:
   * `init_existential_metatype`_
   * `open_existential_metatype`_
 
-- **Boxed existential containers**: The standard library ``ErrorType`` protocol
+- **Boxed existential containers**: The standard library ``Error`` protocol
   uses a size-optimized reference-counted container, which indirectly stores
   the conforming value. Boxed existential containers can be ``retain``-ed
   and ``release``-d. The following instructions manipulate boxed existential
@@ -3273,22 +3524,22 @@ container may use one of several representations:
 
 Some existential types may additionally support specialized representations
 when they contain certain known concrete types. For example, when Objective-C
-interop is available, the ``ErrorType`` protocol existential supports
+interop is available, the ``Error`` protocol existential supports
 a class existential container representation for ``NSError`` objects, so it
 can be initialized from one using ``init_existential_ref`` instead of the
 more expensive ``alloc_existential_box``::
 
   bb(%nserror: $NSError):
-    // The slow general way to form an ErrorType, allocating a box and
+    // The slow general way to form an Error, allocating a box and
     // storing to its value buffer:
-    %error1 = alloc_existential_box $ErrorType, $NSError
-    %addr = project_existential_box $NSError in %error1 : $ErrorType
+    %error1 = alloc_existential_box $Error, $NSError
+    %addr = project_existential_box $NSError in %error1 : $Error
     strong_retain %nserror: $NSError
     store %nserror to %addr : $NSError
 
     // The fast path supported for NSError:
     strong_retain %nserror: $NSError
-    %error2 = init_existential_ref %nserror: $NSError, $ErrorType
+    %error2 = init_existential_ref %nserror: $NSError, $Error
 
 init_existential_addr
 `````````````````````
@@ -3545,9 +3796,9 @@ pointer_to_address
 ``````````````````
 ::
 
-  sil-instruction ::= 'pointer_to_address' sil-operand 'to' sil-type
+  sil-instruction ::= 'pointer_to_address' sil-operand 'to' ('[' 'strict' ']')? sil-type
 
-  %1 = pointer_to_address %0 : $Builtin.RawPointer to $*T
+  %1 = pointer_to_address %0 : $Builtin.RawPointer to [strict] $*T
   // %1 will be of type $*T
 
 Creates an address value corresponding to the ``Builtin.RawPointer`` value
@@ -3557,6 +3808,14 @@ address. It is undefined behavior to cast the ``RawPointer`` back to any type
 other than its original address type or `layout compatible types`_. It is
 also undefined behavior to cast a ``RawPointer`` from a heap object to any
 address type.
+
+The ``strict`` flag indicates whether the returned address adheres to
+strict aliasing.  If true, then the type of each memory access
+dependent on this address must be consistent with the memory's bound
+type. A memory access from an address that is not strict cannot have
+its address substituted with a strict address, even if other nearby
+memory accesses at the same location are strict.
+
 
 unchecked_ref_cast
 ``````````````````
@@ -3610,7 +3869,7 @@ unchecked_addr_cast
 
 Converts an address to a different address type. Using the resulting
 address is undefined unless ``B`` is layout compatible with ``A``. The
-layout of ``A`` may be smaller than that of ``B`` as long as the lower
+layout of ``B`` may be smaller than that of ``A`` as long as the lower
 order bytes have identical layout.
 
 unchecked_trivial_bit_cast
@@ -3735,12 +3994,8 @@ in the following ways:
 - A class tuple element of the destination type may be a superclass or
   subclass of the source type's corresponding tuple element.
 
-The function types may also differ in attributes, with the following
-caveats:
-
-- The ``convention`` attribute cannot be changed.
-- A ``@noreturn`` function may be converted to a non-``@noreturn``
-  type and vice-versa.
+The function types may also differ in attributes, except that the
+``convention`` attribute cannot be changed.
 
 thin_function_to_pointer
 ````````````````````````
@@ -3956,7 +4211,7 @@ unreachable
 Indicates that control flow must not reach the end of the current basic block.
 It is a dataflow error if an unreachable terminator is reachable from the entry
 point of a function and is not immediately preceded by an ``apply`` of a
-``@noreturn`` function.
+no-return function.
 
 return
 ``````
@@ -4344,7 +4599,7 @@ The compiler flag that influences the value of the ``assert_configuration``
 function application is the optimization flag: at ``-Onone` the application will
 be replaced by ``Debug`` at higher optimization levels the instruction will be
 replaced by ``Release``. Optionally, the value to use for replacement can be
-specified with the ``-AssertConf`` flag which overwrites the value selected by
+specified with the ``-assert-config`` flag which overwrites the value selected by
 the optimization flag (possible values are ``Debug``, ``Release``,
 ``DisableReplacement``).
 

@@ -16,7 +16,7 @@
 #include "swift/Basic/LLVM.h"
 #include "swift/AST/Module.h"
 #include "swift/AST/ASTPrinter.h"
-#include "swift/IDE/SourceEntityWalker.h"
+#include "swift/AST/SourceEntityWalker.h"
 #include "llvm/ADT/StringRef.h"
 #include <memory>
 #include <string>
@@ -71,7 +71,8 @@ struct SourceCompleteResult {
       IndentLevel(0) {}
 };
 
-SourceCompleteResult isSourceInputComplete(std::unique_ptr<llvm::MemoryBuffer> MemBuf);
+SourceCompleteResult
+isSourceInputComplete(std::unique_ptr<llvm::MemoryBuffer> MemBuf);
 SourceCompleteResult isSourceInputComplete(StringRef Text);
 
 bool initInvocationByClangArguments(ArrayRef<const char *> ArgList,
@@ -99,8 +100,8 @@ struct PlaceholderOccurrence {
   StringRef IdentifierReplacement;
 };
 
-/// Replaces Xcode editor placeholders (<#such as this#>) with dollar identifiers
-/// and returns a new memory buffer.
+/// Replaces Xcode editor placeholders (<#such as this#>) with dollar
+/// identifiers and returns a new memory buffer.
 ///
 /// The replacement identifier will be the same size as the placeholder so that
 /// the new buffer will have the same size as the input buffer.
@@ -112,9 +113,10 @@ std::unique_ptr<llvm::MemoryBuffer>
   replacePlaceholders(std::unique_ptr<llvm::MemoryBuffer> InputBuf,
                       bool *HadPlaceholder = nullptr);
 
-void getLocationInfo(const ValueDecl *VD,
-                     llvm::Optional<std::pair<unsigned, unsigned>> &DeclarationLoc,
-                     StringRef &Filename);
+void getLocationInfo(
+    const ValueDecl *VD,
+    llvm::Optional<std::pair<unsigned, unsigned>> &DeclarationLoc,
+    StringRef &Filename);
 
 void getLocationInfoForClangNode(ClangNode ClangNode,
                                  ClangImporter *Importer,
@@ -123,12 +125,14 @@ void getLocationInfoForClangNode(ClangNode ClangNode,
 
 Optional<std::pair<unsigned, unsigned>> parseLineCol(StringRef LineCol);
 
-Type getTypeFromMangledTypename(ASTContext &Ctx,
-                                const char *mangled_typename,
+Decl *getDeclFromUSR(ASTContext &context, StringRef USR, std::string &error);
+Decl *getDeclFromMangledSymbolName(ASTContext &context, StringRef mangledName,
+                                   std::string &error);
+
+Type getTypeFromMangledTypename(ASTContext &Ctx, StringRef mangledName,
                                 std::string &error);
 
-Type getTypeFromMangledSymbolname(ASTContext &Ctx,
-                                  const char *mangled_typename,
+Type getTypeFromMangledSymbolname(ASTContext &Ctx, StringRef mangledName,
                                   std::string &error);
 
 class XMLEscapingPrinter : public StreamPrinter {
@@ -147,11 +151,13 @@ struct SemaToken {
   bool IsKeywordArgument = false;
   Type Ty;
   DeclContext *DC = nullptr;
+  Type ContainerType;
 
   SemaToken() = default;
   SemaToken(ValueDecl *ValueD, TypeDecl *CtorTyRef, SourceLoc Loc, bool IsRef,
-            Type Ty) : ValueD(ValueD), CtorTyRef(CtorTyRef), Loc(Loc),
-            IsRef(IsRef), Ty(Ty), DC(ValueD->getDeclContext()) {}
+            Type Ty, Type ContainerType) : ValueD(ValueD), CtorTyRef(CtorTyRef), Loc(Loc),
+            IsRef(IsRef), Ty(Ty), DC(ValueD->getDeclContext()),
+            ContainerType(ContainerType) {}
   SemaToken(ModuleEntity Mod, SourceLoc Loc) : Mod(Mod), Loc(Loc) { }
 
   bool isValid() const { return ValueD != nullptr || Mod; }
@@ -162,12 +168,14 @@ class SemaLocResolver : public SourceEntityWalker {
   SourceFile &SrcFile;
   SourceLoc LocToResolve;
   SemaToken SemaTok;
+  Type ContainerType;
 
 public:
   explicit SemaLocResolver(SourceFile &SrcFile) : SrcFile(SrcFile) { }
   SemaToken resolve(SourceLoc Loc);
   SourceManager &getSourceMgr() const;
 private:
+  bool walkToExprPre(Expr *E) override;
   bool walkToDeclPre(Decl *D, CharSourceRange Range) override;
   bool walkToDeclPost(Decl *D) override;
   bool walkToStmtPre(Stmt *S) override;
@@ -190,14 +198,12 @@ private:
 } // namespace ide
 
 class ArchetypeTransformer {
-  std::function<Type(Type)> TheFunc = nullptr;
-  DeclContext *DC;
-  Type BaseTy;
-  llvm::DenseMap<TypeBase *, Type> Cache;
-  TypeSubstitutionMap Map;
+  struct Implementation;
+  Implementation &Impl;
 public:
   ArchetypeTransformer(DeclContext *DC, Type Ty);
   llvm::function_ref<Type(Type)> getTransformerFunc();
+  ~ArchetypeTransformer();
 };
 } // namespace swift
 

@@ -1,4 +1,4 @@
-// RUN: %target-sil-opt -enable-sil-verify-all %s -sil-combine -verify-skip-unreachable-must-be-last | FileCheck %s
+// RUN: %target-sil-opt -enable-sil-verify-all %s -sil-combine -verify-skip-unreachable-must-be-last | %FileCheck %s
 // REQUIRES: objc_interop
 
 sil_stage canonical
@@ -13,8 +13,8 @@ class ZZZ {
 
 class C {}
 
-sil @stringcore_invariant_check : $@convention(thin) (@owned _StringCore) -> @owned Optional<_CocoaStringType>
-sil @reabstraction_thunk : $@convention(thin) (@out Optional<_CocoaStringType>, @owned @callee_owned () -> @owned Optional<_CocoaStringType>) -> ()
+sil @stringcore_invariant_check : $@convention(thin) (@owned _StringCore) -> @owned Optional<_CocoaString>
+sil @reabstraction_thunk : $@convention(thin) (@owned @callee_owned () -> @owned Optional<_CocoaString>) -> @out Optional<_CocoaString>
 
 // CHECK-LABEL: sil @dead_closure_elimination : $@convention(thin) (@owned _StringCore) -> ()
 // CHECK: bb0
@@ -23,11 +23,11 @@ sil @reabstraction_thunk : $@convention(thin) (@out Optional<_CocoaStringType>, 
 // CHECK-NEXT: return
 sil @dead_closure_elimination : $@convention(thin) (@owned _StringCore) -> () {
 bb0(%0 : $_StringCore):
-  %1 = function_ref @stringcore_invariant_check : $@convention(thin) (@owned _StringCore) -> @owned Optional<_CocoaStringType>
-  %2 = partial_apply %1(%0) : $@convention(thin) (@owned _StringCore) -> @owned Optional<_CocoaStringType>
-  %3 = function_ref @reabstraction_thunk : $@convention(thin) (@out Optional<_CocoaStringType>, @owned @callee_owned () -> @owned Optional<_CocoaStringType>) -> ()
-  %4 = partial_apply %3(%2) : $@convention(thin) (@out Optional<_CocoaStringType>, @owned @callee_owned () -> @owned Optional<_CocoaStringType>) -> ()
-  strong_release %4 : $@callee_owned (@out Optional<_CocoaStringType>) -> ()
+  %1 = function_ref @stringcore_invariant_check : $@convention(thin) (@owned _StringCore) -> @owned Optional<_CocoaString>
+  %2 = partial_apply %1(%0) : $@convention(thin) (@owned _StringCore) -> @owned Optional<_CocoaString>
+  %3 = function_ref @reabstraction_thunk : $@convention(thin) (@owned @callee_owned () -> @owned Optional<_CocoaString>) -> @out Optional<_CocoaString>
+  %4 = partial_apply %3(%2) : $@convention(thin) (@owned @callee_owned () -> @owned Optional<_CocoaString>) -> @out Optional<_CocoaString>
+  strong_release %4 : $@callee_owned () -> @out Optional<_CocoaString>
   %5 = tuple()
   return %5 : $()
 }
@@ -41,16 +41,16 @@ bb0(%0 : $_StringCore):
 // CHECK-NEXT:   return
 sil @dead_closure_elimination2 : $@convention(thin) (@owned _StringCore) -> () {
 bb0(%0 : $_StringCore):
-  %1 = function_ref @stringcore_invariant_check : $@convention(thin) (@owned _StringCore) -> @owned Optional<_CocoaStringType>
-  %2 = partial_apply %1(%0) : $@convention(thin) (@owned _StringCore) -> @owned Optional<_CocoaStringType>
-  %3 = function_ref @reabstraction_thunk : $@convention(thin) (@out Optional<_CocoaStringType>, @owned @callee_owned () -> @owned Optional<_CocoaStringType>) -> ()
-  %4 = partial_apply %3(%2) : $@convention(thin) (@out Optional<_CocoaStringType>, @owned @callee_owned () -> @owned Optional<_CocoaStringType>) -> ()
+  %1 = function_ref @stringcore_invariant_check : $@convention(thin) (@owned _StringCore) -> @owned Optional<_CocoaString>
+  %2 = partial_apply %1(%0) : $@convention(thin) (@owned _StringCore) -> @owned Optional<_CocoaString>
+  %3 = function_ref @reabstraction_thunk : $@convention(thin) (@owned @callee_owned () -> @owned Optional<_CocoaString>) -> @out Optional<_CocoaString>
+  %4 = partial_apply %3(%2) : $@convention(thin) (@owned @callee_owned () -> @owned Optional<_CocoaString>) -> @out Optional<_CocoaString>
   br bb1
 
 bb1:
-  strong_retain %4 : $@callee_owned (@out Optional<_CocoaStringType>) -> ()
-  strong_release %4 : $@callee_owned (@out Optional<_CocoaStringType>) -> ()
-  strong_release %4 : $@callee_owned (@out Optional<_CocoaStringType>) -> ()
+  strong_retain %4 : $@callee_owned () -> @out Optional<_CocoaString>
+  strong_release %4 : $@callee_owned () -> @out Optional<_CocoaString>
+  strong_release %4 : $@callee_owned () -> @out Optional<_CocoaString>
   %5 = tuple()
   return %5 : $()
 }
@@ -68,11 +68,11 @@ bb0(%0 : $ZZZ):
   %3 = apply %2(%1) : $@convention(thin) (Builtin.Word) -> @owned (Array<ZZZ>, Builtin.RawPointer)
   %4 = tuple_extract %3 : $(Array<ZZZ>, Builtin.RawPointer), 0
   %5 = tuple_extract %3 : $(Array<ZZZ>, Builtin.RawPointer), 1
-  %6 = pointer_to_address %5 : $Builtin.RawPointer to $*ZZZ
+  %6 = pointer_to_address %5 : $Builtin.RawPointer to [strict] $*ZZZ
   store %0 to %6 : $*ZZZ
   %8 = struct_extract %4 : $Array<ZZZ>, #Array._buffer
   %9 = struct_extract %8 : $_ArrayBuffer<ZZZ>, #_ArrayBuffer._storage
-  %10 = struct_extract %9 : $_BridgeStorage<_ContiguousArrayStorageBase, _NSArrayCoreType>, #_BridgeStorage.rawValue
+  %10 = struct_extract %9 : $_BridgeStorage<_ContiguousArrayStorageBase, _NSArrayCore>, #_BridgeStorage.rawValue
   strong_release %10 : $Builtin.BridgeObject
   %12 = tuple ()
   return %12 : $()
@@ -112,7 +112,7 @@ bb0(%0 : $*_HeapBuffer<C, Int>):
   %3 = apply %2<_HeapBuffer<C, Int>>(%1) : $@convention(thin) <τ_0_0> (Builtin.Word) -> @owned (Array<τ_0_0>, Builtin.RawPointer)
   %4 = tuple_extract %3 : $(Array<_HeapBuffer<C, Int>>, Builtin.RawPointer), 0 // user: %15
   %5 = tuple_extract %3 : $(Array<_HeapBuffer<C, Int>>, Builtin.RawPointer), 1 // user: %6
-  %6 = pointer_to_address %5 : $Builtin.RawPointer to $*_HeapBuffer<C, Int> // user: %9
+  %6 = pointer_to_address %5 : $Builtin.RawPointer to [strict] $*_HeapBuffer<C, Int> // user: %9
   %7 = load %0 : $*_HeapBuffer<C, Int>            // users: %8, %9
   %8 = struct_extract %7 : $_HeapBuffer<C, Int>, #_HeapBuffer._storage // user: %13
   store %7 to %6 : $*_HeapBuffer<C, Int>          // id: %9
@@ -123,7 +123,7 @@ bb0(%0 : $*_HeapBuffer<C, Int>):
   %14 = apply %10(%12) : $@convention(thin) (@owned @callee_owned () -> Bool) -> ()
   %15 = struct_extract %4 : $Array<_HeapBuffer<C, Int>>, #Array._buffer // user: %16
   %16 = struct_extract %15 : $_ArrayBuffer<_HeapBuffer<C, Int>>, #_ArrayBuffer._storage // user: %17
-  %17 = struct_extract %16 : $_BridgeStorage<_ContiguousArrayStorageBase, _NSArrayCoreType>, #_BridgeStorage.rawValue // user: %18
+  %17 = struct_extract %16 : $_BridgeStorage<_ContiguousArrayStorageBase, _NSArrayCore>, #_BridgeStorage.rawValue // user: %18
   strong_release %17 : $Builtin.BridgeObject      // id: %18
   %19 = tuple ()                                  // user: %20
   return %19 : $()                                // id: %20

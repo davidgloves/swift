@@ -19,11 +19,13 @@
 #define SWIFT_SEMA_CONSTRAINT_H
 
 #include "OverloadChoice.h"
+#include "swift/AST/FunctionRefKind.h"
 #include "swift/AST/Identifier.h"
 #include "swift/AST/Type.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/ilist.h"
 #include "llvm/ADT/ilist_node.h"
+#include "llvm/Support/TrailingObjects.h"
 
 namespace llvm {
 
@@ -200,12 +202,12 @@ enum class ConversionRestrictionKind {
   DictionaryUpcast,
   /// Implicit upcast conversion of set types, which includes bridging.
   SetUpcast,
+  /// T:Hashable -> AnyHashable conversion.
+  HashableToAnyHashable,
   /// Implicit bridging from a value type to an Objective-C class.
   BridgeToObjC,
   /// Explicit bridging from an Objective-C class to a value type.
   BridgeFromObjC,
-  /// Explicit bridging from an ErrorType to an Objective-C NSError.
-  BridgeToNSError,
   /// Implicit conversion from a CF type to its toll-free-bridged Objective-C
   /// class type.
   CFTollFreeBridgeToObjC,
@@ -233,36 +235,15 @@ enum class FixKind : uint8_t {
 
   /// Introduce a '!' to force an optional unwrap.
   ForceOptional,
+    
+  /// Introduce a '?.' to begin optional chaining.
+  OptionalChaining,
 
   /// Append 'as! T' to force a downcast to the specified type.
   ForceDowncast,
 
   /// Introduce a '&' to take the address of an lvalue.
   AddressOf,
-
-  /// Remove a no-argument call to something that is not a function.
-  RemoveNullaryCall,
-
-  /// Relabel a tuple due to a tuple-to-scalar conversion.
-  TupleToScalar,
-
-  /// Relabel a tuple due to a scalar-to-tuple conversion.
-  ScalarToTuple,
-
-  /// Relabel a tuple due to a call
-  RelabelCallTuple,
-  
-  /// Introduce a '!= nil' to convert an Optional to a Boolean expression.
-  OptionalToBoolean,
-
-  /// Replace a use of 'fromRaw' with an initializer requirement.
-  FromRawToInit,
-
-  /// Replace a call of 'toRaw' with a reference to 'rawValue'.
-  ToRawToRawValue,
-
-  /// Replace a call of 'X.allZeros' with a reference to 'X()'.
-  AllZerosToInit,
   
   /// Replace a coercion ('as') with a forced checked cast ('as!').
   CoerceToCheckedCast,
@@ -283,32 +264,14 @@ public:
   Fix() : Kind(FixKind::None), Data(0) { }
   
   Fix(FixKind kind) : Kind(kind), Data(0) { 
-    assert(!isRelabelTuple() && "Use getRelabelTuple()");
     assert(kind != FixKind::ForceDowncast && "Use getForceDowncast()");
   }
-
-  /// Produce a new fix that relabels a tuple.
-  static Fix getRelabelTuple(ConstraintSystem &cs, FixKind kind,
-                             ArrayRef<Identifier> names);
 
   /// Produce a new fix that performs a forced downcast to the given type.
   static Fix getForcedDowncast(ConstraintSystem &cs, Type toType);
 
   /// Retrieve the kind of fix.
   FixKind getKind() const { return Kind; }
-
-  /// Whether the fix is a tuple-relabelling fix.
-  bool isRelabelTuple() const { return isRelabelTupleKind(getKind()); }
-
-  /// Whether the fix kind is a tuple-relabelling fix.
-  static bool isRelabelTupleKind(FixKind kind) { 
-    return kind == FixKind::TupleToScalar ||
-           kind == FixKind::ScalarToTuple ||
-           kind == FixKind::RelabelCallTuple;
-  }
-
-  /// For a relabel-tuple fix, retrieve the new names.
-  ArrayRef<Identifier> getRelabelTupleNames(ConstraintSystem &cs) const;
 
   /// If this fix has a type argument, retrieve it.
   Type getTypeArgument(ConstraintSystem &cs) const;
@@ -325,18 +288,21 @@ public:
 
 
 /// \brief A constraint between two type variables.
-class Constraint : public llvm::ilist_node<Constraint> {
+class Constraint final : public llvm::ilist_node<Constraint>,
+    private llvm::TrailingObjects<Constraint, TypeVariableType *> {
+  friend TrailingObjects;
+
   /// \brief The kind of constraint.
   ConstraintKind Kind : 8;
 
   /// The kind of restriction placed on this constraint.
   ConversionRestrictionKind Restriction : 8;
 
-  /// The kind of fix to be applied to the constraint before visiting it.
-  FixKind TheFix;
-
   /// Data associated with the fix.
   uint16_t FixData;
+
+  /// The kind of fix to be applied to the constraint before visiting it.
+  FixKind TheFix;
 
   /// Whether the \c Restriction field is valid.
   unsigned HasRestriction : 1;
@@ -359,7 +325,10 @@ class Constraint : public llvm::ilist_node<Constraint> {
   /// The number of type variables referenced by this constraint.
   ///
   /// The type variables themselves are tail-allocated.
-  unsigned NumTypeVariables : 12;
+  unsigned NumTypeVariables : 11;
+
+  /// The kind of function reference, for member references.
+  unsigned TheFunctionRefKind : 2;
 
   union {
     struct {
@@ -399,7 +368,9 @@ class Constraint : public llvm::ilist_node<Constraint> {
 
   /// Construct a new constraint.
   Constraint(ConstraintKind kind, Type first, Type second, DeclName member,
-             ConstraintLocator *locator, ArrayRef<TypeVariableType *> typeVars);
+             FunctionRefKind functionRefKind,
+             ConstraintLocator *locator,
+             ArrayRef<TypeVariableType *> typeVars);
 
   /// Construct a new overload-binding constraint.
   Constraint(Type type, OverloadChoice choice, ConstraintLocator *locator,
@@ -417,13 +388,14 @@ class Constraint : public llvm::ilist_node<Constraint> {
 
   /// Retrieve the type variables buffer, for internal mutation.
   MutableArrayRef<TypeVariableType *> getTypeVariablesBuffer() {
-    return { reinterpret_cast<TypeVariableType **>(this + 1), NumTypeVariables };
+    return { getTrailingObjects<TypeVariableType *>(), NumTypeVariables };
   }
 
 public:
   /// Create a new constraint.
   static Constraint *create(ConstraintSystem &cs, ConstraintKind Kind, 
                             Type First, Type Second, DeclName Member,
+                            FunctionRefKind functionRefKind,
                             ConstraintLocator *locator);
 
   /// Create an overload-binding constraint.
@@ -485,8 +457,7 @@ public:
 
   /// Retrieve the set of type variables referenced by this constraint.
   ArrayRef<TypeVariableType *> getTypeVariables() const {
-    return { reinterpret_cast<TypeVariableType * const *>(this + 1), 
-             NumTypeVariables };
+    return {getTrailingObjects<TypeVariableType*>(), NumTypeVariables};
   }
 
   /// \brief Determine the classification of this constraint, providing
@@ -560,6 +531,16 @@ public:
     return kind == ConstraintKind::ValueMember
         || kind == ConstraintKind::UnresolvedValueMember
         || kind == ConstraintKind::TypeMember;
+  }
+
+  /// Determine the kind of function reference we have for a member reference.
+  FunctionRefKind getFunctionRefKind() const {
+    if (Kind == ConstraintKind::ValueMember ||
+        Kind == ConstraintKind::UnresolvedValueMember)
+      return static_cast<FunctionRefKind>(TheFunctionRefKind);
+
+    // Conservative answer: drop all of the labels.
+    return FunctionRefKind::Compound;
   }
 
   /// Retrieve the set of constraints in a disjunction.

@@ -38,14 +38,16 @@ namespace swift {
   enum class SpecialProtocol : uint8_t;
   
 namespace irgen {
-  class AbstractCallee;
   class Callee;
+  class ConstantReference;
   class Explosion;
   class FieldTypeInfo;
+  class GenericTypeRequirements;
   class IRGenFunction;
   class IRGenModule;
   class Size;
   class StructLayout;
+  enum class SymbolReferenceKind : unsigned char;
   struct ClassLayout;
 
   /// Is the given class known to have Swift-compatible metadata?
@@ -79,8 +81,20 @@ namespace irgen {
   /// Emit a reference to a compile-time constant piece of type metadata, or
   /// return a null pointer if the type's metadata cannot be represented by a
   /// constant.
-  llvm::Constant *tryEmitConstantTypeMetadataRef(IRGenModule &IGM,
-                                                 CanType type);
+  ConstantReference tryEmitConstantTypeMetadataRef(IRGenModule &IGM,
+                                                   CanType type,
+                                                   SymbolReferenceKind refKind);
+
+  /// Get the type as it exists in Swift's runtime type system, removing any
+  /// erased generic parameters.
+  CanType getRuntimeReifiedType(IRGenModule &IGM, CanType type);
+
+  /// Emit a reference to a compile-time constant piece of heap metadata, or
+  /// return a null pointer if the type's heap metadata cannot be represented
+  /// by a constant.
+  llvm::Constant *tryEmitConstantHeapMetadataRef(IRGenModule &IGM,
+                                                 CanType type,
+                                                 bool allowUninitialized);
 
   enum class MetadataValueType { ObjCClass, TypeMetadata };
 
@@ -120,6 +134,12 @@ namespace irgen {
 
   /// Emit the metadata associated with the given enum declaration.
   void emitEnumMetadata(IRGenModule &IGM, EnumDecl *theEnum);
+
+  /// Get what will be the index into the generic type argument array at the end
+  /// of a nominal type's metadata.
+  int32_t getIndexOfGenericArgument(IRGenModule &IGM,
+                                    NominalTypeDecl *decl,
+                                    ArchetypeType *archetype);
   
   /// Given a reference to nominal type metadata of the given type,
   /// derive a reference to the parent type metadata.  There must be a
@@ -129,20 +149,21 @@ namespace irgen {
                                      llvm::Value *metadata);
 
   /// Given a reference to nominal type metadata of the given type,
-  /// derive a reference to the nth argument metadata.  The type must
-  /// have generic arguments.
+  /// derive a reference to the type metadata stored in the nth
+  /// requirement slot.  The type must have generic arguments.
   llvm::Value *emitArgumentMetadataRef(IRGenFunction &IGF,
                                        NominalTypeDecl *theDecl,
-                                       unsigned argumentIndex,
+                                       const GenericTypeRequirements &reqts,
+                                       unsigned reqtIndex,
                                        llvm::Value *metadata);
 
   /// Given a reference to nominal type metadata of the given type,
-  /// derive a reference to a protocol witness table for the nth
-  /// argument metadata.  The type must have generic arguments.
+  /// derive a reference to a protocol witness table stored in the nth
+  /// requirement slot.  The type must have generic arguments.
   llvm::Value *emitArgumentWitnessTableRef(IRGenFunction &IGF,
                                            NominalTypeDecl *theDecl,
-                                           unsigned argumentIndex,
-                                           ProtocolDecl *targetProtocol,
+                                           const GenericTypeRequirements &reqts,
+                                           unsigned reqtIndex,
                                            llvm::Value *metadata);
 
   /// Get the offset of a field in the class type metadata.
@@ -207,10 +228,6 @@ namespace irgen {
                                                 llvm::Value *object,
                                                 SILType objectType,
                                                 bool suppressCast = false);
-
-  /// Derive the abstract callee for a virtual call to the given method.
-  AbstractCallee getAbstractVirtualCallee(IRGenFunction &IGF,
-                                          FuncDecl *method);
 
   /// Given an instance pointer (or, for a static method, a class
   /// pointer), emit the callee for the given method.

@@ -3,16 +3,10 @@
 
 import StdlibUnittest
 
-// Also import modules which are used by StdlibUnittest internally. This
-// workaround is needed to link all required libraries in case we compile
-// StdlibUnittest with -sil-serialize-all.
-#if _runtime(_ObjC)
-import ObjectiveC
-#endif
 
 let PrintTests = TestSuite("PrintInteger")
 PrintTests.test("CustomStringConvertible") {
-  func hasDescription(any: Any) {
+  func hasDescription(_ any: Any) {
     expectTrue(any is CustomStringConvertible)
   }
 
@@ -39,9 +33,9 @@ PrintTests.test("CustomStringConvertible") {
   hasDescription(CInt(42))
   hasDescription(CLong(42))
   hasDescription(CLongLong(42))
-  hasDescription(CWideChar(42))
+  hasDescription(CWideChar(42)!)
   hasDescription(CChar16(42))
-  hasDescription(CChar32(42))
+  hasDescription(CChar32(42)!)
 }
 
 PrintTests.test("Printable") {
@@ -56,9 +50,9 @@ PrintTests.test("Printable") {
   expectPrinted("42", CInt(42))
   expectPrinted("42", CLong(42))
   expectPrinted("42", CLongLong(42))
-  expectPrinted("*", CWideChar(42))
+  expectPrinted("*", CWideChar(42)!)
   expectPrinted("42", CChar16(42))
-  expectPrinted("*", CChar32(42))
+  expectPrinted("*", CChar32(42)!)
 
   if (UInt64(Int.max) > 0x1_0000_0000 as UInt64) {
     expectPrinted("-9223372036854775808", Int.min)
@@ -147,9 +141,9 @@ PrintTests.test("Printable") {
   expectPrinted("42", CLong(42))
   expectPrinted("42", CLongLong(42))
 
-  expectPrinted("*", CWideChar(42))
+  expectPrinted("*", CWideChar(42)!)
   expectPrinted("42", CChar16(42))
-  expectPrinted("*", CChar32(42))
+  expectPrinted("*", CChar32(42)!)
 }
 
 runAllTests()

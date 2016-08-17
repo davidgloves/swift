@@ -1,4 +1,7 @@
-// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -target x86_64-apple-macosx10.51 -parse %s -verify
+// RUN: rm -rf %t && mkdir %t
+// RUN: %build-clang-importer-objc-overlays
+
+// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk-nosource -I %t) -target x86_64-apple-macosx10.51 -parse %s -verify
 
 // REQUIRES: OS=macosx
 // REQUIRES: objc_interop
@@ -6,7 +9,7 @@
 import AppKit
 import NotificationCenter
 
-func testInstanceTypeFactoryMethod(queen: Bee) {
+func testInstanceTypeFactoryMethod(_ queen: Bee) {
   _ = Hive(queen: queen)
   
   _ = NSObjectFactory() // okay, prefers init method
@@ -19,7 +22,8 @@ func testInstanceTypeFactoryMethodInherited() {
   _ = NSObjectFactorySub() // okay, prefers init method
   _ = NSObjectFactorySub(integer: 1)
   _ = NSObjectFactorySub(double: 314159)
-  _ = NSObjectFactorySub(float: 314159) // expected-error{{incorrect argument label in call (have 'float:', expected 'integer:')}} {{26-31=integer}}
+  _ = NSObjectFactorySub(float: 314159) // expected-error{{argument labels '(float:)' do not match any available overloads}} 
+  // expected-note @-1 {{overloads for 'NSObjectFactorySub' exist with these partially matching parameter lists: (integer: Int), (double: Double)}}
   let a = NSObjectFactorySub(buildingWidgets: ()) // expected-error{{argument labels '(buildingWidgets:)' do not match any available overloads}}
   // expected-note @-1 {{overloads for 'NSObjectFactorySub' exist with these partially matching parameter lists: (integer: Int), (double: Double)}}
   _ = a
@@ -70,17 +74,17 @@ func testFactoryWithLaterIntroducedInit() {
   _ = NSHavingUnavailableFactoryAndUnavailableConvenienceInit(flam:5) // expected-error {{'init(flam:)' is unavailable: ConvenienceInit}}
 }
 
-func testNSErrorFactoryMethod(path: String) throws {
+func testNSErrorFactoryMethod(_ path: String) throws {
   _ = try NSString(contentsOfFile: path)
 }
 
-func testNonInstanceTypeFactoryMethod(s: String) {
+func testNonInstanceTypeFactoryMethod(_ s: String) {
   _ = NSObjectFactory(string: s) // expected-error{{argument labels '(string:)' do not match any available overloads}}
   // expected-note @-1 {{(integer: Int), (double: Double), (float: Float)}}
 }
 
-func testUseOfFactoryMethod(queen: Bee) {
-  _ = Hive.hiveWithQueen(queen) // expected-error{{'hiveWithQueen' is unavailable: use object construction 'Hive(queen:)'}}
+func testUseOfFactoryMethod(_ queen: Bee) {
+  _ = Hive.withQueen(queen) // expected-error{{'withQueen' is unavailable: use object construction 'Hive(queen:)'}}
 }
 
 func testNonsplittableFactoryMethod() {
@@ -89,21 +93,21 @@ func testNonsplittableFactoryMethod() {
 
 func testFactoryMethodBlacklist() {
   _ = NCWidgetController.widgetController()
-  _ = NSProcessInfo.processInfo()
+  _ = ProcessInfo.processInfo()
 }
 
 func test17261609() {
   _ = NSDecimalNumber(mantissa:1, exponent:1, isNegative:true)
-  NSDecimalNumber.decimalNumberWithMantissa(1, exponent:1, isNegative:true) // expected-error{{'decimalNumberWithMantissa(_:exponent:isNegative:)' is unavailable: use object construction 'NSDecimalNumber(mantissa:exponent:isNegative:)'}}
+  _ = NSDecimalNumber.withMantissa(1, exponent:1, isNegative:true) // expected-error{{'withMantissa(_:exponent:isNegative:)' is unavailable: use object construction 'NSDecimalNumber(mantissa:exponent:isNegative:)'}}
 }
 
 func testURL() {
-  let url = NSURL(string: "http://www.llvm.org")
-  NSURL.URLWithString("http://www.llvm.org") // expected-error{{'URLWithString' is unavailable: use object construction 'NSURL(string:)'}}
+  let url = NSURL(string: "http://www.llvm.org")!
+  _ = NSURL.withString("http://www.llvm.org") // expected-error{{'withString' is unavailable: use object construction 'NSURL(string:)'}}
 
   NSURLRequest(string: "http://www.llvm.org") // expected-warning{{unused}}
-  NSURLRequest(URL: url) // expected-warning{{unused}}
+  NSURLRequest(url: url as URL) // expected-warning{{unused}}
 
-  NSURLRequest.requestWithString("http://www.llvm.org") // expected-error{{'requestWithString' is unavailable: use object construction 'NSURLRequest(string:)'}}
-  NSURLRequest.URLRequestWithURL(url) // expected-error{{'URLRequestWithURL' is unavailable: use object construction 'NSURLRequest(URL:)'}}
+  _ = NSURLRequest.withString("http://www.llvm.org") // expected-error{{'withString' is unavailable: use object construction 'NSURLRequest(string:)'}}
+  _ = NSURLRequest.withURL(url as URL) // expected-error{{'withURL' is unavailable: use object construction 'NSURLRequest(url:)'}}
 }

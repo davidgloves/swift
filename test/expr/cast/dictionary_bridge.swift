@@ -2,6 +2,16 @@
 
 // REQUIRES: objc_interop
 
+// FIXME: Should go into the standard library.
+public extension _ObjectiveCBridgeable {
+  static func _unconditionallyBridgeFromObjectiveC(_ source: _ObjectiveCType?)
+      -> Self {
+    var result: Self? = nil
+    _forceBridgeFromObjectiveC(source!, result: &result)
+    return result!
+  }
+}
+
 class Root : Hashable { 
   var hashValue: Int {
     return 0
@@ -17,24 +27,17 @@ class ObjC : Root {
 class DerivesObjC : ObjC { }
 
 struct BridgedToObjC : Hashable, _ObjectiveCBridgeable {
-  static func _isBridgedToObjectiveC() -> Bool {
-    return true
-  }
-  
-  static func _getObjectiveCType() -> Any.Type {
-    return ObjC.self
-  }
   func _bridgeToObjectiveC() -> ObjC {
     return ObjC()
   }
   static func _forceBridgeFromObjectiveC(
-    x: ObjC,
-    inout result: BridgedToObjC?
+    _ x: ObjC,
+    result: inout BridgedToObjC?
   ) {
   }
   static func _conditionallyBridgeFromObjectiveC(
-    x: ObjC,
-    inout result: BridgedToObjC?
+    _ x: ObjC,
+    result: inout BridgedToObjC?
   ) -> Bool {
     return true
   }
@@ -60,25 +63,25 @@ func testUpcastBridge() {
   var dictOB = Dictionary<ObjC, BridgedToObjC>()
 
   // Upcast to object types.
-  dictRR = dictBB
-  dictRR = dictBO
-  dictRR = dictOB
+  dictRR = dictBB as [Root: Root]
+  dictRR = dictBO as [Root: Root]
+  dictRR = dictOB as [Root: Root]
 
-  dictRO = dictBB
-  dictRO = dictBO
-  dictRO = dictOB
+  dictRO = dictBB as [Root: ObjC]
+  dictRO = dictBO as [Root: ObjC]
+  dictRO = dictOB as [Root: ObjC]
 
-  dictOR = dictBB
-  dictOR = dictBO
-  dictOR = dictOB
+  dictOR = dictBB as [ObjC: Root]
+  dictOR = dictBO as [ObjC: Root]
+  dictOR = dictOB as [ObjC: Root]
 
-  dictOO = dictBB
-  dictOO = dictBO
-  dictOO = dictOB
+  dictOO = dictBB as [ObjC: ObjC]
+  dictOO = dictBO as [ObjC: ObjC]
+  dictOO = dictOB as [ObjC: ObjC]
 
   // Upcast key or value to object type (but not both)
-  dictBO = dictBB
-  dictOB = dictBB
+  dictBO = dictBB as [BridgedToObjC: ObjC]
+  dictOB = dictBB as [ObjC: BridgedToObjC]
 
   dictBB = dictBO // expected-error{{cannot assign value of type 'Dictionary<BridgedToObjC, ObjC>' to type 'Dictionary<BridgedToObjC, BridgedToObjC>'}}
   dictBB = dictOB // expected-error{{cannot assign value of type 'Dictionary<ObjC, BridgedToObjC>' to type 'Dictionary<BridgedToObjC, BridgedToObjC>'}}
@@ -104,19 +107,19 @@ func testDowncastBridge() {
   let dictOB = Dictionary<ObjC, BridgedToObjC>()
 
   // Downcast to bridged value types.
-  dictRR as! Dictionary<BridgedToObjC, BridgedToObjC>
-  dictRR as! Dictionary<BridgedToObjC, ObjC>
-  dictRR as! Dictionary<ObjC, BridgedToObjC>
+  _ = dictRR as! Dictionary<BridgedToObjC, BridgedToObjC>
+  _ = dictRR as! Dictionary<BridgedToObjC, ObjC>
+  _ = dictRR as! Dictionary<ObjC, BridgedToObjC>
 
-  dictRO as! Dictionary<BridgedToObjC, BridgedToObjC>
-  dictRO as! Dictionary<BridgedToObjC, ObjC>
-  dictRO as! Dictionary<ObjC, BridgedToObjC>
+  _ = dictRO as! Dictionary<BridgedToObjC, BridgedToObjC>
+  _ = dictRO as! Dictionary<BridgedToObjC, ObjC>
+  _ = dictRO as! Dictionary<ObjC, BridgedToObjC>
 
-  dictBO as! Dictionary<BridgedToObjC, BridgedToObjC>
-  dictOB as! Dictionary<BridgedToObjC, BridgedToObjC>
+  _ = dictBO as Dictionary<BridgedToObjC, BridgedToObjC>
+  _ = dictOB as Dictionary<BridgedToObjC, BridgedToObjC>
 
   // We don't do mixed down/upcasts.
-  dictDO as! Dictionary<BridgedToObjC, BridgedToObjC> // expected-error{{'Dictionary<DerivesObjC, ObjC>' is not convertible to 'Dictionary<BridgedToObjC, BridgedToObjC>'}}
+  _ = dictDO as! Dictionary<BridgedToObjC, BridgedToObjC> // expected-error{{'Dictionary<DerivesObjC, ObjC>' is not convertible to 'Dictionary<BridgedToObjC, BridgedToObjC>'}}
 }
 
 func testConditionalDowncastBridge() {
@@ -141,8 +144,8 @@ func testConditionalDowncastBridge() {
   if let d = dictRO as? Dictionary<BridgedToObjC, ObjC> { }
   if let d = dictRO as? Dictionary<ObjC, BridgedToObjC> { }
 
-  if let d = dictBO as? Dictionary<BridgedToObjC, BridgedToObjC> { }
-  if let d = dictOB as? Dictionary<BridgedToObjC, BridgedToObjC> { }
+  let d1 = dictBO as Dictionary<BridgedToObjC, BridgedToObjC>
+  let d2 = dictOB as Dictionary<BridgedToObjC, BridgedToObjC>
 
   // We don't do mixed down/upcasts.
   if let d = dictDO as? Dictionary<BridgedToObjC, BridgedToObjC> { } // expected-error{{'Dictionary<DerivesObjC, ObjC>' is not convertible to 'Dictionary<BridgedToObjC, BridgedToObjC>'}}

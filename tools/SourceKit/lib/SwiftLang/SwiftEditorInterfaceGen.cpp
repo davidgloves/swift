@@ -79,6 +79,10 @@ public:
   SourceTextInfo Info;
   // This is the non-typechecked AST for the generated interface source.
   CompilerInstance TextCI;
+  // Synchronize access to the embedded compiler instance (if we don't have an
+  // ASTUnit).
+  WorkQueue Queue{WorkQueue::Dequeuing::Serial,
+                  "sourcekit.swift.InterfaceGenContext"};
 };
 
 typedef SwiftInterfaceGenContext::Implementation::TextRange TextRange;
@@ -112,12 +116,35 @@ class AnnotatingPrinter : public StreamPrinter {
   };
   std::vector<DeclUSR> DeclUSRs;
 
+  // For members of a synthesized extension, we should append the USR of the
+  // synthesize target to the original USR.
+  std::string TargetUSR;
+
 public:
   AnnotatingPrinter(SourceTextInfo &Info, llvm::raw_ostream &OS)
     : StreamPrinter(OS), Info(Info) { }
 
   ~AnnotatingPrinter() {
     assert(DeclUSRs.empty() && "unmatched printDeclLoc call ?");
+  }
+
+
+  void printSynthesizedExtensionPre(const ExtensionDecl *ED,
+                                    const NominalTypeDecl *Target,
+                                    Optional<BracketOptions> Bracket) override {
+    // When we start print a synthesized extension, record the target's USR.
+    llvm::SmallString<64> Buf;
+    llvm::raw_svector_ostream OS(Buf);
+    if (!SwiftLangSupport::printUSR(Target, OS)) {
+      TargetUSR = OS.str();
+    }
+  }
+
+  void printSynthesizedExtensionPost(const ExtensionDecl *ED,
+                                     const NominalTypeDecl *Target,
+                                     Optional<BracketOptions> Bracket) override {
+    // When we leave a synthesized extension, clear target's USR.
+    TargetUSR = "";
   }
 
   void printDeclLoc(const Decl *D) override {
@@ -133,6 +160,12 @@ public:
       llvm::SmallString<64> Buf;
       llvm::raw_svector_ostream OS(Buf);
       if (!SwiftLangSupport::printUSR(VD, OS)) {
+
+        // Append target's USR if this is a member of a synthesized extension.
+        if (!TargetUSR.empty()) {
+          OS << LangSupport::SynthesizedUSRSeparator;
+          OS << TargetUSR;
+        }
         StringRef USR = OS.str();
         Info.USRMap[USR] = Entry;
         DeclUSRs.emplace_back(VD, USR);
@@ -140,7 +173,7 @@ public:
     }
   }
 
-  void printDeclNameEndLoc(const Decl *D) override {
+  void printDeclNameOrSignatureEndLoc(const Decl *D) override {
     unsigned Offset = OS.tell();
 
     if (!Info.Decls.empty() && Info.Decls.back().Dcl == D) {
@@ -156,10 +189,10 @@ public:
     }
   }
 
-  void printTypeRef(const TypeDecl *TD, Identifier Name) override {
+  void printTypeRef(Type T, const TypeDecl *TD, Identifier Name) override {
     unsigned StartOffset = OS.tell();
     Info.References.emplace_back(TD, StartOffset, Name.str().size());
-    StreamPrinter::printTypeRef(TD, Name);
+    StreamPrinter::printTypeRef(T, TD, Name);
   }
 
   void printModuleRef(ModuleEntity Mod, Identifier Name) override {
@@ -243,8 +276,11 @@ static void reportSemanticAnnotations(const SourceTextInfo &IFaceInfo,
 
 static bool getModuleInterfaceInfo(ASTContext &Ctx,
                                    StringRef ModuleName,
+                                   Optional<StringRef> Group,
                                  SwiftInterfaceGenContext::Implementation &Impl,
-                                   std::string &ErrMsg) {
+                                   std::string &ErrMsg,
+                                   bool SynthesizedExtensions,
+                                   Optional<StringRef> InterestedUSR) {
   Module *&Mod = Impl.Mod;
   SourceTextInfo &Info = Impl.Info;
 
@@ -285,9 +321,14 @@ static bool getModuleInterfaceInfo(ASTContext &Ctx,
   SmallString<128> Text;
   llvm::raw_svector_ostream OS(Text);
   AnnotatingPrinter Printer(Info, OS);
+  if (!Group && InterestedUSR) {
+    Group = findGroupNameForUSR(Mod, InterestedUSR.getValue());
+  }
   printSubmoduleInterface(Mod, SplitModuleName,
+    Group.hasValue() ? llvm::makeArrayRef(Group.getValue()) : ArrayRef<StringRef>(),
                           TraversalOptions,
-                          Printer, Options, false);
+                          Printer, Options,
+                          Group.hasValue() && SynthesizedExtensions);
 
   Info.Text = OS.str();
   return false;
@@ -341,8 +382,11 @@ SwiftInterfaceGenContextRef
 SwiftInterfaceGenContext::create(StringRef DocumentName,
                                  bool IsModule,
                                  StringRef ModuleOrHeaderName,
+                                 Optional<StringRef> Group,
                                  CompilerInvocation Invocation,
-                                 std::string &ErrMsg) {
+                                 std::string &ErrMsg,
+                                 bool SynthesizedExtensions,
+                                 Optional<StringRef> InterestedUSR) {
   SwiftInterfaceGenContextRef IFaceGenCtx{ new SwiftInterfaceGenContext() };
   IFaceGenCtx->Impl.DocumentName = DocumentName;
   IFaceGenCtx->Impl.IsModule = IsModule;
@@ -370,8 +414,8 @@ SwiftInterfaceGenContext::create(StringRef DocumentName,
   }
 
   if (IsModule) {
-    if (getModuleInterfaceInfo(Ctx, ModuleOrHeaderName, IFaceGenCtx->Impl,
-                               ErrMsg))
+    if (getModuleInterfaceInfo(Ctx, ModuleOrHeaderName, Group, IFaceGenCtx->Impl,
+                               ErrMsg, SynthesizedExtensions, InterestedUSR))
       return nullptr;
   } else {
     auto &FEOpts = Invocation.getFrontendOptions();
@@ -395,6 +439,53 @@ SwiftInterfaceGenContext::create(StringRef DocumentName,
     return nullptr;
   }
 
+  return IFaceGenCtx;
+}
+
+SwiftInterfaceGenContextRef
+SwiftInterfaceGenContext::createForTypeInterface(CompilerInvocation Invocation,
+                                                 StringRef TypeUSR,
+                                                 std::string &ErrorMsg) {
+  SwiftInterfaceGenContextRef IFaceGenCtx{ new SwiftInterfaceGenContext() };
+  IFaceGenCtx->Impl.IsModule = false;
+  IFaceGenCtx->Impl.ModuleOrHeaderName = TypeUSR;
+  IFaceGenCtx->Impl.Invocation = Invocation;
+  CompilerInstance &CI = IFaceGenCtx->Impl.Instance;
+  SourceTextInfo &Info = IFaceGenCtx->Impl.Info;
+
+  // Display diagnostics to stderr.
+  CI.addDiagnosticConsumer(&IFaceGenCtx->Impl.DiagConsumer);
+
+  if (CI.setup(Invocation)) {
+    ErrorMsg = "Error during invocation setup";
+    return nullptr;
+  }
+  CI.performSema();
+  ASTContext &Ctx = CI.getASTContext();
+  CloseClangModuleFiles scopedCloseFiles(*Ctx.getClangModuleLoader());
+
+  // Load standard library so that Clang importer can use it.
+  auto *Stdlib = getModuleByFullName(Ctx, Ctx.StdlibModuleName);
+  if (!Stdlib) {
+    ErrorMsg = "Could not load the stdlib module";
+    return nullptr;
+  }
+  auto *Module = CI.getMainModule();
+  if (!Module) {
+    ErrorMsg = "Could not load the main module";
+    return nullptr;
+  }
+  SmallString<128> Text;
+  llvm::raw_svector_ostream OS(Text);
+  AnnotatingPrinter Printer(Info, OS);
+  if (ide::printTypeInterface(Module, TypeUSR, Printer,
+                              IFaceGenCtx->Impl.DocumentName, ErrorMsg))
+    return nullptr;
+  IFaceGenCtx->Impl.Info.Text = OS.str();
+  if (makeParserAST(IFaceGenCtx->Impl.TextCI, IFaceGenCtx->Impl.Info.Text)) {
+    ErrorMsg = "Error during syntactic parsing";
+    return nullptr;
+  }
   return IFaceGenCtx;
 }
 
@@ -456,6 +547,14 @@ void SwiftInterfaceGenContext::reportEditorInfo(EditorConsumer &Consumer) const 
   reportDocumentStructure(Impl.TextCI, Consumer);
   reportSemanticAnnotations(Impl.Info, Consumer);
   Consumer.finished();
+}
+
+void SwiftInterfaceGenContext::accessASTAsync(std::function<void()> Fn) {
+  if (Impl.AstUnit) {
+    Impl.AstUnit->performAsync(std::move(Fn));
+  } else {
+    Impl.Queue.dispatch(std::move(Fn));
+  }
 }
 
 SwiftInterfaceGenContext::ResolvedEntity
@@ -541,15 +640,52 @@ SwiftInterfaceGenMap::find(StringRef ModuleName,
   }
   return nullptr;
 }
+//===----------------------------------------------------------------------===//
+// EditorOpenTypeInterface
+//===----------------------------------------------------------------------===//
+void SwiftLangSupport::editorOpenTypeInterface(EditorConsumer &Consumer,
+                                               ArrayRef<const char *> Args,
+                                               StringRef TypeUSR) {
+  CompilerInstance CI;
+  // Display diagnostics to stderr.
+  PrintingDiagnosticConsumer PrintDiags;
+  CI.addDiagnosticConsumer(&PrintDiags);
+
+  CompilerInvocation Invocation;
+  std::string Error;
+  if (getASTManager().initCompilerInvocation(Invocation, Args, CI.getDiags(),
+                                             StringRef(), Error)) {
+    Consumer.handleRequestError(Error.c_str());
+    return;
+  }
+  Invocation.getClangImporterOptions().ImportForwardDeclarations = true;
+
+  std::string ErrMsg;
+  auto IFaceGenRef = SwiftInterfaceGenContext::createForTypeInterface(
+                                                      Invocation,
+                                                      TypeUSR,
+                                                      ErrMsg);
+  if (!IFaceGenRef) {
+    Consumer.handleRequestError(ErrMsg.c_str());
+    return;
+  }
+
+  IFaceGenRef->reportEditorInfo(Consumer);
+  // reportEditorInfo requires exclusive access to the AST, so don't add this
+  // to the service cache until it has returned.
+  IFaceGenContexts.set(TypeUSR, IFaceGenRef);
+}
 
 //===----------------------------------------------------------------------===//
 // EditorOpenInterface
 //===----------------------------------------------------------------------===//
-
 void SwiftLangSupport::editorOpenInterface(EditorConsumer &Consumer,
                                            StringRef Name,
                                            StringRef ModuleName,
-                                           ArrayRef<const char *> Args) {
+                                           Optional<StringRef> Group,
+                                           ArrayRef<const char *> Args,
+                                           bool SynthesizedExtensions,
+                                           Optional<StringRef> InterestedUSR) {
   CompilerInstance CI;
   // Display diagnostics to stderr.
   PrintingDiagnosticConsumer PrintDiags;
@@ -580,15 +716,20 @@ void SwiftLangSupport::editorOpenInterface(EditorConsumer &Consumer,
   auto IFaceGenRef = SwiftInterfaceGenContext::create(Name,
                                                       /*IsModule=*/true,
                                                       ModuleName,
+                                                      Group,
                                                       Invocation,
-                                                      ErrMsg);
+                                                      ErrMsg,
+                                                      SynthesizedExtensions,
+                                                      InterestedUSR);
   if (!IFaceGenRef) {
     Consumer.handleRequestError(ErrMsg.c_str());
     return;
   }
 
-  IFaceGenContexts.set(Name, IFaceGenRef);
   IFaceGenRef->reportEditorInfo(Consumer);
+  // reportEditorInfo requires exclusive access to the AST, so don't add this
+  // to the service cache until it has returned.
+  IFaceGenContexts.set(Name, IFaceGenRef);
 }
 
 class PrimaryFileInterfaceConsumer : public SwiftASTConsumer {
@@ -649,7 +790,8 @@ void SwiftLangSupport::editorOpenSwiftSourceInterface(StringRef Name,
 void SwiftLangSupport::editorOpenHeaderInterface(EditorConsumer &Consumer,
                                                  StringRef Name,
                                                  StringRef HeaderName,
-                                                 ArrayRef<const char *> Args) {
+                                                 ArrayRef<const char *> Args,
+                                                 bool SynthesizedExtensions) {
   CompilerInstance CI;
   // Display diagnostics to stderr.
   PrintingDiagnosticConsumer PrintDiags;
@@ -683,15 +825,20 @@ void SwiftLangSupport::editorOpenHeaderInterface(EditorConsumer &Consumer,
   auto IFaceGenRef = SwiftInterfaceGenContext::create(Name,
                                                       /*IsModule=*/false,
                                                       HeaderName,
+                                                      None,
                                                       Invocation,
-                                                      Error);
+                                                      Error,
+                                                      SynthesizedExtensions,
+                                                      None);
   if (!IFaceGenRef) {
     Consumer.handleRequestError(Error.c_str());
     return;
   }
 
-  IFaceGenContexts.set(Name, IFaceGenRef);
   IFaceGenRef->reportEditorInfo(Consumer);
+  // reportEditorInfo requires exclusive access to the AST, so don't add this
+  // to the service cache until it has returned.
+  IFaceGenContexts.set(Name, IFaceGenRef);
 }
 
 void SwiftLangSupport::findInterfaceDocument(StringRef ModuleName,

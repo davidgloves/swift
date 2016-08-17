@@ -1,10 +1,10 @@
-// RUN: %target-swift-frontend -emit-ir %s | FileCheck %s
+// RUN: %target-swift-frontend -emit-ir %s | %FileCheck %s
 
 // REQUIRES: CPU=x86_64
 // XFAIL: linux
 
-// CHECK: [[OPAQUE:%swift.opaque]] = type opaque
 // CHECK: [[TYPE:%swift.type]] = type
+// CHECK: [[OPAQUE:%swift.opaque]] = type opaque
 // CHECK: [[C:%C4weak1C]] = type <{ [[REF:%swift.refcounted]] }>
 // CHECK: [[A:%V4weak1A]] = type <{ [[WEAK:%swift.weak]] }>
 // CHECK: [[WEAK]] = type
@@ -41,14 +41,14 @@ bb0(%0 : $*A, %1 : $Optional<C>):
   %4 = tuple ()
   return %4 : $()
 }
-// CHECK:    define void @test_weak_load_store([[A]]* nocapture dereferenceable({{.*}}), i64) {{.*}} {
+// CHECK:    define{{( protected)?}} void @test_weak_load_store([[A]]* nocapture dereferenceable({{.*}}), i64) {{.*}} {
 // CHECK:      [[X:%.*]] = getelementptr inbounds [[A]], [[A]]* %0, i32 0, i32 0
 // CHECK-NEXT: [[T0:%.*]] = call [[C]]* bitcast ([[REF]]* ([[WEAK]]*)* @swift_weakLoadStrong to [[C]]* ([[WEAK]]*)*)([[WEAK]]* [[X]])
 // CHECK-NEXT: %3 = ptrtoint  %C4weak1C* %2 to i64
 // CHECK-NEXT: %4 = inttoptr
 // CHECK-NEXT: call void bitcast (void ([[WEAK]]*, [[REF]]*)* @swift_weakAssign to void ([[WEAK]]*, [[C]]*)*)([[WEAK]]* [[X]], [[C]]* %4)
 // CHECK-NEXT: %5 = inttoptr i64 %3 to %swift.refcounted*
-// CHECK-NEXT: call void @swift_release([[REF]]* %5)
+// CHECK-NEXT: call void @rt_swift_release([[REF]]* %5)
 // CHECK-NEXT: ret void
 
 struct B {
@@ -64,7 +64,7 @@ bb0(%0 : $*B, %1 : $Optional<P>):
   %4 = tuple ()
   return %4 : $()
 }
-// CHECK:    define void @test_weak_load_store_proto([[B]]* nocapture dereferenceable({{.*}}), i64, i64)
+// CHECK:    define{{( protected)?}} void @test_weak_load_store_proto([[B]]* nocapture dereferenceable({{.*}}), i64, i64)
 // CHECK:      [[X:%.*]] = getelementptr inbounds [[B]], [[B]]* %0, i32 0, i32 0
 // CHECK-NEXT: [[T0:%.*]] = getelementptr inbounds { [[WEAK]], i8** }, { [[WEAK]], i8** }* [[X]], i32 0, i32 0
 // CHECK-NEXT: [[T1:%.*]] = call [[UNKNOWN]]* @swift_unknownWeakLoadStrong([[WEAK]]* [[T0]])
@@ -88,7 +88,7 @@ bb0(%0 : $Optional<P>):
   %4 = tuple ()
   return %4 : $()
 }
-// CHECK:    define void @test_weak_alloc_stack(i64, i64)
+// CHECK:    define{{( protected)?}} void @test_weak_alloc_stack(i64, i64)
 // CHECK:      [[X:%.*]] = alloca { [[WEAK]], i8** }, align 8
 // CHECK: [[TMPOBJ:%.*]] = inttoptr {{.*}} to %objc_object*
 // CHECK: [[TMPTAB:%.*]] = inttoptr {{.*}} to i8**

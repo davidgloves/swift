@@ -1,4 +1,4 @@
-add_swift_library(swiftAST
+add_swift_library(swiftAST STATIC
   ArchetypeBuilder.cpp
   ASTContext.cpp
   ASTDumper.cpp
@@ -17,8 +17,8 @@ add_swift_library(swiftAST
   DeclContext.cpp
   DeclNameLoc.cpp
   DefaultArgumentKind.cpp
-  DiagnosticList.cpp
   DiagnosticEngine.cpp
+  DiagnosticList.cpp
   DocComment.cpp
   Expr.cpp
   GenericSignature.cpp
@@ -35,8 +35,10 @@ add_swift_library(swiftAST
   ProtocolConformance.cpp
   RawComment.cpp
   Stmt.cpp
+  SourceEntityWalker.cpp
   Substitution.cpp
   Type.cpp
+  TypeJoinMeet.cpp
   TypeRefinementContext.cpp
   TypeRepr.cpp
   TypeWalker.cpp
@@ -66,14 +68,15 @@ add_swift_library(swiftAST
     clangAPINotes
     clangBasic
 
-  COMPONENT_DEPENDS
+  LLVM_COMPONENT_DEPENDS
     bitreader bitwriter irreader debuginfoDWARF
     profiledata instrumentation object objcarcopts mc mcparser
-    bitreader bitwriter ipo option core support ${LLVM_TARGETS_TO_BUILD}
+    bitreader bitwriter lto ipo option core support ${LLVM_TARGETS_TO_BUILD}
   )
 
 if(NOT SWIFT_BUILT_STANDALONE)
-  add_dependencies(swiftAST intrinsics_gen)
+  get_property(CLANG_TABLEGEN_TARGETS GLOBAL PROPERTY CLANG_TABLEGEN_TARGETS)
+  add_dependencies(swiftAST intrinsics_gen ${CLANG_TABLEGEN_TARGETS})
 endif()
 
 set(swift_ast_verifier_flag)

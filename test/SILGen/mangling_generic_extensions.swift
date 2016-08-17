@@ -1,11 +1,11 @@
-// RUN: %target-swift-frontend -emit-silgen %s | FileCheck %s
+// RUN: %target-swift-frontend -emit-silgen %s | %FileCheck %s
 
 struct Foo<T> {
 }
 
 protocol Runcible {
-  typealias Spoon
-  typealias Hat
+  associatedtype Spoon
+  associatedtype Hat
 }
 
 extension Foo {

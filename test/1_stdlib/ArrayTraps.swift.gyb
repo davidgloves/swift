@@ -1,22 +1,16 @@
 // RUN: rm -rf %t
 // RUN: mkdir -p %t
-// RUN: %S/../../utils/gyb %s -o %t/ArrayTraps.swift
-// RUN: %S/../../utils/line-directive %t/ArrayTraps.swift -- %target-build-swift %t/ArrayTraps.swift -o %t/a.out_Debug
-// RUN: %S/../../utils/line-directive %t/ArrayTraps.swift -- %target-build-swift %t/ArrayTraps.swift -o %t/a.out_Release -O
+// RUN: %gyb %s -o %t/ArrayTraps.swift
+// RUN: %line-directive %t/ArrayTraps.swift -- %target-build-swift %t/ArrayTraps.swift -o %t/a.out_Debug
+// RUN: %line-directive %t/ArrayTraps.swift -- %target-build-swift %t/ArrayTraps.swift -o %t/a.out_Release -O
 //
-// RUN: %S/../../utils/line-directive %t/ArrayTraps.swift -- %target-run %t/a.out_Debug
-// RUN: %S/../../utils/line-directive %t/ArrayTraps.swift -- %target-run %t/a.out_Release
+// RUN: %line-directive %t/ArrayTraps.swift -- %target-run %t/a.out_Debug
+// RUN: %line-directive %t/ArrayTraps.swift -- %target-run %t/a.out_Release
 // REQUIRES: executable_test
 
 import StdlibUnittest
 
-// Also import modules which are used by StdlibUnittest internally. This
-// workaround is needed to link all required libraries in case we compile
-// StdlibUnittest with -sil-serialize-all.
-import SwiftPrivate
-#if _runtime(_ObjC)
-import ObjectiveC
-#endif
+let testSuiteSuffix = _isDebugAssertConfiguration() ? "_debug" : "_release"
 
 %{
 # We test for bounds-checking traps for both reading and writing
@@ -34,12 +28,12 @@ def bounds_trap(index, expr_to_write):
 
 % for ArrayTy in array_types:
 
-var ${ArrayTy}Traps = TestSuite("${ArrayTy}Traps")
+var ${ArrayTy}Traps = TestSuite("${ArrayTy}Traps" + testSuiteSuffix)
 
 %   for io in ['read', 'write']:
 
 ${ArrayTy}Traps.test("bounds1/${io}")
-  .skip(.Custom(
+  .skip(.custom(
     { _isFastAssertConfiguration() },
     reason: "this trap is not guaranteed to happen in -Ounchecked"))
   .code {
@@ -48,7 +42,7 @@ ${ArrayTy}Traps.test("bounds1/${io}")
 }
 
 ${ArrayTy}Traps.test("bounds2/${io}")
-  .skip(.Custom(
+  .skip(.custom(
     { _isFastAssertConfiguration() },
     reason: "this trap is not guaranteed to happen in -Ounchecked"))
   .code {
@@ -57,7 +51,7 @@ ${ArrayTy}Traps.test("bounds2/${io}")
 }
 
 ${ArrayTy}Traps.test("bounds3/${io}")
-  .skip(.Custom(
+  .skip(.custom(
     { _isFastAssertConfiguration() },
     reason: "this trap is not guaranteed to happen in -Ounchecked"))
   .code {
@@ -66,7 +60,7 @@ ${ArrayTy}Traps.test("bounds3/${io}")
 }
 
 ${ArrayTy}Traps.test("sliceBounds0/${io}")
-  .skip(.Custom(
+  .skip(.custom(
     { _isFastAssertConfiguration() },
     reason: "this trap is not guaranteed to happen in -Ounchecked"))
   .code {
@@ -75,7 +69,7 @@ ${ArrayTy}Traps.test("sliceBounds0/${io}")
 }
 
 ${ArrayTy}Traps.test("sliceBounds1/${io}")
-  .skip(.Custom(
+  .skip(.custom(
     { _isFastAssertConfiguration() },
     reason: "this trap is not guaranteed to happen in -Ounchecked"))
   .code {
@@ -84,7 +78,7 @@ ${ArrayTy}Traps.test("sliceBounds1/${io}")
 }
 
 ${ArrayTy}Traps.test("sliceBounds2/${io}")
-  .skip(.Custom(
+  .skip(.custom(
     { _isFastAssertConfiguration() },
     reason: "this trap is not guaranteed to happen in -Ounchecked"))
   .code {
@@ -93,7 +87,7 @@ ${ArrayTy}Traps.test("sliceBounds2/${io}")
 }
 
 ${ArrayTy}Traps.test("sliceBounds3/${io}")
-  .skip(.Custom(
+  .skip(.custom(
     { _isFastAssertConfiguration() },
     reason: "this trap is not guaranteed to happen in -Ounchecked"))
   .code {
@@ -110,32 +104,32 @@ ${ArrayTy}Traps.test("PopFromEmpty") {
 }
 
 %   for index in -1, 2:
-${ArrayTy}Traps.test("${'insert(_:atIndex:)/%s' % index}")
-  .skip(.Custom(
+${ArrayTy}Traps.test("${'insert(_:at:)/%s' % index}")
+  .skip(.custom(
     { _isFastAssertConfiguration() },
     reason: "this trap is not guaranteed to happen in -Ounchecked"))
   .code {
   var a: ${ArrayTy}<Int> = [42]
   expectCrashLater()
-  a.insert(3, atIndex: ${index})
+  a.insert(3, at: ${index})
 }
 %   end
 
 %   for index in -1, 1, 2:
-${ArrayTy}Traps.test("${'removeAtIndex(_:)/%s' % index}")
-  .skip(.Custom(
+${ArrayTy}Traps.test("${'remove(at:)/%s' % index}")
+  .skip(.custom(
     { _isFastAssertConfiguration() },
     reason: "this trap is not guaranteed to happen in -Ounchecked"))
   .code {
   var a: ${ArrayTy}<Int> = [42]
   expectCrashLater()
-  a.removeAtIndex(${index})
+  a.remove(at: ${index})
 }
 %   end
 % end
 
 ArrayTraps.test("unsafeLength")
-  .skip(.Custom(
+  .skip(.custom(
     { _isFastAssertConfiguration() },
     reason: "this trap is not guaranteed to happen in -Ounchecked"))
   .code {
@@ -145,7 +139,7 @@ ArrayTraps.test("unsafeLength")
 
   expectCrashLater()
 
-  a.withUnsafeBufferPointer {
+  _ = a.withUnsafeBufferPointer {
     UnsafeBufferPointer(start: $0.baseAddress, count: -1)
   }
 }

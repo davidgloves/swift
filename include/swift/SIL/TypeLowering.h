@@ -151,12 +151,6 @@ public:
     return !isAddressOnly();
   }
   
-  /// True if the type was successfully lowered, false if there was an error
-  /// during type lowering.
-  virtual bool isValid() const {
-    return true;
-  }
-  
   /// Returns true if the type is trivial, meaning it is a loadable
   /// value type with no reference type members that require releasing.
   bool isTrivial() const {
@@ -360,7 +354,6 @@ protected:
 };
 
 /// Type and lowering information about a constant function.
-SIL_FUNCTION_TYPE_IGNORE_DEPRECATED_BEGIN
 struct SILConstantInfo {
   /// The formal type of the constant, still curried.  For a normal
   /// function, this is just its declared type; for a getter or
@@ -387,12 +380,6 @@ struct SILConstantInfo {
     return SILType::getPrimitiveObjectType(SILFnType);
   }
 
-  ArrayRef<Substitution> getForwardingSubstitutions(ASTContext &C) {
-    if (!ContextGenericParams)
-      return { };
-    return ContextGenericParams->getForwardingSubstitutions(C);
-  }
-
   friend bool operator==(SILConstantInfo lhs, SILConstantInfo rhs) {
     return lhs.FormalInterfaceType == rhs.FormalInterfaceType &&
            lhs.LoweredInterfaceType == rhs.LoweredInterfaceType &&
@@ -404,7 +391,6 @@ struct SILConstantInfo {
     return !(lhs == rhs);
   }
 };
-SIL_FUNCTION_TYPE_IGNORE_DEPRECATED_END
 
 /// Different ways in which a function can capture context.
 enum class CaptureKind {
@@ -530,9 +516,6 @@ class TypeConverter {
   
   llvm::DenseMap<AnyFunctionRef, CaptureInfo> LoweredCaptures;
   
-  /// The set of recursive types we've already diagnosed.
-  llvm::DenseSet<NominalTypeDecl *> RecursiveNominalTypes;
-
   /// The current generic context signature.
   CanGenericSignature CurGenericContext;
   
@@ -548,7 +531,6 @@ class TypeConverter {
 #define BRIDGING_KNOWN_TYPE(BridgedModule,BridgedType) \
   Optional<CanType> BridgedType##Ty;
 #include "swift/SIL/BridgedTypes.def"
-  Optional<CanType> BridgedTypeErrorType;
 
   const TypeLowering &getTypeLoweringForLoweredType(TypeKey key);
   const TypeLowering &getTypeLoweringForUncachedLoweredType(TypeKey key);
@@ -653,6 +635,15 @@ public:
 
   SILType getLoweredTypeOfGlobal(VarDecl *var);
 
+  /// The return type of a materializeForSet contains a callback
+  /// whose type cannot be represented in the AST because it is
+  /// a polymorphic function value. This function returns the
+  /// unsubstituted lowered type of this callback.
+  CanSILFunctionType
+  getMaterializeForSetCallbackType(AbstractStorageDecl *storage,
+                                   CanGenericSignature genericSig,
+                                   Type selfType);
+
   /// Return the SILFunctionType for a native function value of the
   /// given type.
   CanSILFunctionType getSILFunctionType(AbstractionPattern origType,
@@ -672,6 +663,10 @@ public:
   CanSILFunctionType getConstantFunctionType(SILDeclRef constant) {
     return getConstantInfo(constant).SILFnType;
   }
+  
+  /// Returns the SILParameterInfo for the given declaration's `self` parameter.
+  /// `constant` must refer to a method.
+  SILParameterInfo getConstantSelfParameter(SILDeclRef constant);
   
   /// Returns the SILFunctionType the given declaration must use to override.
   /// Will be the same as getConstantFunctionType if the declaration does
@@ -781,11 +776,6 @@ public:
   CanType get##BridgedType##Type();
 #include "swift/SIL/BridgedTypes.def"
 
-  /// Get the linkage for a protocol conformance's witness table.
-  static SILLinkage getLinkageForProtocolConformance(
-                                             const NormalProtocolConformance *C,
-                                             ForDefinition_t definition);
-
   /// Get the capture list from a closure, with transitive function captures
   /// flattened.
   CaptureInfo getLoweredLocalCaptures(AnyFunctionRef fn);
@@ -814,6 +804,13 @@ public:
   ABIDifference checkFunctionForABIDifferences(SILFunctionType *fnTy1,
                                                SILFunctionType *fnTy2);
 
+
+  /// Lower the function type as a possible substitution for the type of
+  /// \p constant. The result is not cached as part of the constant's normal
+  /// ConstantInfo.
+  CanSILFunctionType
+  getUncachedSILFunctionTypeForConstant(SILDeclRef constant,
+                                  CanAnyFunctionType origInterfaceType);
 private:
   Type getLoweredCBridgedType(AbstractionPattern pattern, Type t,
                               bool canBridgeBool,

@@ -49,6 +49,16 @@ void ArgumentSource::rewriteType(CanType newType) & {
   }
 }
 
+bool ArgumentSource::requiresCalleeToEvaluate() {
+  switch (StoredKind) {
+  case Kind::RValue:
+  case Kind::LValue:
+    return false;
+  case Kind::Expr:
+    return isa<TupleShuffleExpr>(asKnownExpr());
+  }
+}
+
 RValue ArgumentSource::getAsRValue(SILGenFunction &gen, SGFContext C) && {
   assert(!isLValue());
   if (isRValue())
@@ -94,7 +104,7 @@ void ArgumentSource::forwardInto(SILGenFunction &gen, Initialization *dest) && {
   assert(!isLValue());
   if (isRValue()) {
     auto loc = getKnownRValueLocation();
-    return std::move(*this).asKnownRValue().forwardInto(gen, dest, loc);
+    return std::move(*this).asKnownRValue().forwardInto(gen, loc, dest);
   }
 
   auto e = std::move(*this).asKnownExpr();
@@ -175,5 +185,5 @@ void ArgumentSource::forwardInto(SILGenFunction &SGF,
   // we're emitting into an abstracted value, which RValue doesn't
   // really handle.
   auto substLoweredType = destTL.getLoweredType().getSwiftRValueType();
-  RValue(SGF, loc, substLoweredType, outputValue).forwardInto(SGF, dest, loc);
+  RValue(SGF, loc, substLoweredType, outputValue).forwardInto(SGF, loc, dest);
 }

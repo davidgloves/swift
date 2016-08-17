@@ -20,8 +20,10 @@
 #include "swift/AST/Decl.h"
 #include "swift/AST/Module.h"
 #include "swift/AST/Types.h"
+#include "swift/Basic/Defer.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/ADT/StringSwitch.h"
 using namespace swift;
 
@@ -41,6 +43,16 @@ TypeAttrKind TypeAttributes::getAttrKindFromString(StringRef Str) {
 #include "swift/AST/Attr.def"
   .Default(TAK_Count);
 }
+
+/// Return the name (like "autoclosure") for an attribute ID.
+const char *TypeAttributes::getAttrName(TypeAttrKind kind) {
+  switch (kind) {
+  default: llvm_unreachable("Invalid attribute ID");
+#define TYPE_ATTR(X) case TAK_##X: return #X;
+#include "swift/AST/Attr.def"
+  }
+}
+
 
 
 /// Given a name like "inline", return the decl attribute ID that corresponds
@@ -71,6 +83,21 @@ bool DeclAttribute::canAttributeAppearOnDeclKind(DeclAttrKind DAK, DeclKind DK) 
 #include "swift/AST/DeclNodes.def"
   }
   llvm_unreachable("bad DeclKind");
+}
+
+bool DeclAttributes::isUnavailableInCurrentSwift() const {
+  for (auto attr : *this) {
+    if (auto available = dyn_cast<AvailableAttr>(attr)) {
+      if (available->isInvalid())
+        continue;
+
+      if (available->getUnconditionalAvailability() ==
+            UnconditionalAvailabilityKind::UnavailableInCurrentSwift)
+        return true;
+    }
+  }
+
+  return false;
 }
 
 const AvailableAttr *DeclAttributes::getUnavailable(
@@ -179,8 +206,8 @@ static bool isShortAvailable(const DeclAttribute *DA) {
 /// Print the short-form @available() attribute for an array of long-form
 /// AvailableAttrs that can be represented in the short form.
 /// For example, for:
-///   @available(OSX, introduced=10.10)
-///   @available(iOS, introduced=8.0)
+///   @available(OSX, introduced: 10.10)
+///   @available(iOS, introduced: 8.0)
 /// this will print:
 ///   @available(OSX 10.10, iOS 8.0, *)
 static void printShortFormAvailable(ArrayRef<const DeclAttribute *> Attrs,
@@ -222,16 +249,8 @@ void DeclAttributes::print(ASTPrinter &Printer,
     if (!Options.PrintUserInaccessibleAttrs &&
         DeclAttribute::isUserInaccessible(DA->getKind()))
       continue;
-    if (std::find(Options.ExcludeAttrList.begin(),
-                  Options.ExcludeAttrList.end(),
-                  DA->getKind()) != Options.ExcludeAttrList.end())
+    if (Options.excludeAttrKind(DA->getKind()))
       continue;
-    if (!Options.ExclusiveAttrList.empty()) {
-      if (std::find(Options.ExclusiveAttrList.begin(),
-                    Options.ExclusiveAttrList.end(),
-                    DA->getKind()) == Options.ExclusiveAttrList.end())
-        continue;
-    }
 
     AttributeVector &which = DA->isDeclModifier() ? modifiers :
                              isShortAvailable(DA) ? shortAvailableAttributes :
@@ -266,8 +285,29 @@ SourceLoc DeclAttributes::getStartLoc(bool forModifiers) const {
   return lastAttr ? lastAttr->getRangeWithAt().Start : SourceLoc();
 }
 
-void DeclAttribute::print(ASTPrinter &Printer,
-                          const PrintOptions &Options) const {
+bool DeclAttribute::printImpl(ASTPrinter &Printer, const PrintOptions &Options) const {
+
+  // Handle any attributes that are not printed at all before we make printer
+  // callbacks.
+  switch (getKind()) {
+  case DAK_ObjC:
+    if (Options.PrintForSIL && isImplicit())
+      return false;
+    break;
+  case DAK_RawDocComment:
+  case DAK_ObjCBridged:
+  case DAK_SynthesizedProtocol:
+  case DAK_ShowInInterface:
+  case DAK_Rethrows:
+    return false;
+  default:
+    break;
+  }
+
+  // Handle any decl-modifiers.
+  // FIXME: Ideally we would handle decl modifiers as a special kind of
+  // attribute, but for now it's simpler to treat them as a keyword in the
+  // printer.
   switch (getKind()) {
     // Handle all of the SIMPLE_DECL_ATTRs.
 #define SIMPLE_DECL_ATTR(X, CLASS, ...) case DAK_##CLASS:
@@ -276,25 +316,48 @@ void DeclAttribute::print(ASTPrinter &Printer,
   case DAK_Accessibility:
   case DAK_Ownership:
   case DAK_Effects:
-    if (!DeclAttribute::isDeclModifier(getKind()))
-      Printer << "@";
-    Printer << getAttrName();
-    break;
+    if (DeclAttribute::isDeclModifier(getKind())) {
+      Printer.printKeyword(getAttrName());
+    } else {
+      Printer.callPrintStructurePre(PrintStructureKind::BuiltinAttribute);
+      Printer.printAttrName(getAttrName(), /*needAt=*/true);
+      Printer.printStructurePost(PrintStructureKind::BuiltinAttribute);
+    }
+    return true;
 
+  case DAK_SetterAccessibility:
+    Printer.printKeyword(getAttrName());
+    Printer << "(set)";
+    return true;
+
+  default:
+    break;
+  }
+
+  Printer.callPrintStructurePre(PrintStructureKind::BuiltinAttribute);
+  SWIFT_DEFER {
+    Printer.printStructurePost(PrintStructureKind::BuiltinAttribute);
+  };
+
+  switch (getKind()) {
   case DAK_Semantics:
-    Printer << "@_semantics(\"" << cast<SemanticsAttr>(this)->Value << "\")";
+    Printer.printAttrName("@_semantics");
+    Printer << "(\"" << cast<SemanticsAttr>(this)->Value << "\")";
     break;
 
   case DAK_Alignment:
-    Printer << "@_alignment(" << cast<AlignmentAttr>(this)->Value << ")";
+    Printer.printAttrName("@_alignment");
+    Printer << "(" << cast<AlignmentAttr>(this)->Value << ")";
     break;
 
   case DAK_SILGenName:
-    Printer << "@_silgen_name(\"" << cast<SILGenNameAttr>(this)->Name << "\")";
+    Printer.printAttrName("@_silgen_name");
+    Printer << "(\"" << cast<SILGenNameAttr>(this)->Name << "\")";
     break;
 
   case DAK_Available: {
-    Printer << "@available(";
+    Printer.printAttrName("@available");
+    Printer << "(";
     auto Attr = cast<AvailableAttr>(this);
     Printer << Attr->platformString();
 
@@ -304,36 +367,39 @@ void DeclAttribute::print(ASTPrinter &Printer,
       Printer << ", deprecated";
 
     if (Attr->Introduced)
-      Printer << ", introduced=" << Attr->Introduced.getValue().getAsString();
+      Printer << ", introduced: " << Attr->Introduced.getValue().getAsString();
     if (Attr->Deprecated)
-      Printer << ", deprecated=" << Attr->Deprecated.getValue().getAsString();
+      Printer << ", deprecated: " << Attr->Deprecated.getValue().getAsString();
     if (Attr->Obsoleted)
-      Printer << ", obsoleted=" << Attr->Obsoleted.getValue().getAsString();
+      Printer << ", obsoleted: " << Attr->Obsoleted.getValue().getAsString();
 
     if (!Attr->Rename.empty())
-      Printer << ", renamed=\"" << Attr->Rename << "\"";
+      Printer << ", renamed: \"" << Attr->Rename << "\"";
 
     // If there's no message, but this is specifically an imported
     // "unavailable in Swift" attribute, synthesize a message to look good in
     // the generated interface.
     if (!Attr->Message.empty())
-      Printer << ", message=\"" << Attr->Message << "\"";
+      Printer << ", message: \"" << Attr->Message << "\"";
     else if (Attr->getUnconditionalAvailability()
                == UnconditionalAvailabilityKind::UnavailableInSwift)
-      Printer << ", message=\"Not available in Swift\"";
+      Printer << ", message: \"Not available in Swift\"";
 
     Printer << ")";
     break;
   }
   case DAK_AutoClosure:
-    Printer << "@autoclosure";
+    Printer.printAttrName("@autoclosure");
     if (cast<AutoClosureAttr>(this)->isEscaping())
       Printer << "(escaping)";
     break;
+      
+  case DAK_CDecl:
+    Printer << "@_cdecl(\"" << cast<CDeclAttr>(this)->Name << "\")";
+    break;
+
   case DAK_ObjC: {
-    if (Options.PrintForSIL && isImplicit())
-      break;
-    Printer << "@objc";
+    Printer.printAttrName("@objc");
     llvm::SmallString<32> scratch;
     if (auto Name = cast<ObjCAttr>(this)->getName()) {
       if (!cast<ObjCAttr>(this)->isNameImplicit())
@@ -341,29 +407,18 @@ void DeclAttribute::print(ASTPrinter &Printer,
     }
     break;
   }
-
-  case DAK_SetterAccessibility:
-    Printer << getAttrName() << "(set)";
-    break;
     
   case DAK_SwiftNativeObjCRuntimeBase: {
     auto *attr = cast<SwiftNativeObjCRuntimeBaseAttr>(this);
-    Printer << "@_swift_native_objc_runtime_base("
-            << attr->BaseClassName.str() << ")";
+    Printer.printAttrName("@_swift_native_objc_runtime_base");
+    Printer << "(" << attr->BaseClassName.str() << ")";
     break;
   }
 
-  case DAK_RawDocComment:
-    // Not printed.
-    return;
-
-  case DAK_ObjCBridged:
-    // Not printed.
-    return;
-
   case DAK_Swift3Migration: {
     auto attr = cast<Swift3MigrationAttr>(this);
-    Printer << "@swift3_migration(";
+    Printer.printAttrName("@swift3_migration");
+    Printer << "(";
 
     bool printedAny = false;
     auto printSeparator = [&] {
@@ -373,12 +428,12 @@ void DeclAttribute::print(ASTPrinter &Printer,
 
     if (attr->getRenamed()) {
       printSeparator();
-      Printer << "renamed=\"" << attr->getRenamed() << "\"";
+      Printer << "renamed: \"" << attr->getRenamed() << "\"";
     }
 
     if (!attr->getMessage().empty()) {
       printSeparator();
-      Printer << "message=\"";
+      Printer << "message: \"";
       Printer << attr->getMessage();
       Printer << "\"";
     }
@@ -387,34 +442,31 @@ void DeclAttribute::print(ASTPrinter &Printer,
     break;
   }
 
-  case DAK_SynthesizedProtocol:
-    // Not printed.
-    return;
-
-  case DAK_WarnUnusedResult: {
-    Printer << "@warn_unused_result";
-    auto *attr = cast<WarnUnusedResultAttr>(this);
-    bool printedParens = false;
-    if (!attr->getMessage().empty()) {
-      Printer << "(message=\"" << attr->getMessage() << "\"";
-      printedParens = true;
-    }
-    if (!attr->getMutableVariant().empty()) {
-      if (printedParens)
-        Printer << ", ";
-      else
-        Printer << "(";
-      Printer << "mutable_variant=\"" << attr->getMutableVariant() << "\"";
-      printedParens = true;
-    }
-    if (printedParens)
-      Printer << ")";
+  case DAK_Specialize: {
+    Printer << "@" << getAttrName() << "(";
+    auto *attr = cast<SpecializeAttr>(this);
+    interleave(attr->getTypeLocs(),
+               [&](TypeLoc tyLoc){ tyLoc.getType().print(Printer, Options); },
+               [&]{ Printer << ", "; });
+    Printer << ")";
     break;
   }
 
   case DAK_Count:
     llvm_unreachable("exceed declaration attribute kinds");
+
+  default:
+    llvm_unreachable("handled before this switch");
   }
+
+  return true;
+}
+
+void DeclAttribute::print(ASTPrinter &Printer,
+                          const PrintOptions &Options) const {
+
+  if (!printImpl(Printer, Options))
+    return; // Nothing printed.
 
   if (isLongAttribute() && Options.PrintLongAttrsOnSeparateLines)
     Printer.printNewline();
@@ -450,6 +502,8 @@ StringRef DeclAttribute::getAttrName() const {
     return "_silgen_name";
   case DAK_Alignment:
     return "_alignment";
+  case DAK_CDecl:
+    return "_cdecl";
   case DAK_SwiftNativeObjCRuntimeBase:
     return "_swift_native_objc_runtime_base";
   case DAK_Semantics:
@@ -485,11 +539,16 @@ StringRef DeclAttribute::getAttrName() const {
     switch (cast<AbstractAccessibilityAttr>(this)->getAccess()) {
     case Accessibility::Private:
       return "private";
+    case Accessibility::FilePrivate:
+      return "fileprivate";
     case Accessibility::Internal:
       return "internal";
     case Accessibility::Public:
       return "public";
+    case Accessibility::Open:
+      return "open";
     }
+    llvm_unreachable("bad accessibility kind");
 
   case DAK_Ownership:
     switch (cast<OwnershipAttr>(this)->get()) {
@@ -498,6 +557,7 @@ StringRef DeclAttribute::getAttrName() const {
     case Ownership::Unowned:   return "unowned";
     case Ownership::Unmanaged: return "unowned(unsafe)";
     }
+    llvm_unreachable("bad ownership kind");
   case DAK_RawDocComment:
     return "<<raw doc comment>>";
   case DAK_ObjCBridged:
@@ -506,8 +566,8 @@ StringRef DeclAttribute::getAttrName() const {
     return "<<synthesized protocol>>";
   case DAK_Swift3Migration:
     return "swift3_migration";
-  case DAK_WarnUnusedResult:
-    return "warn_unused_result";
+  case DAK_Specialize:
+    return "_specialize";
   }
   llvm_unreachable("bad DeclAttrKind");
 }
@@ -555,8 +615,7 @@ ObjCAttr *ObjCAttr::createNullary(ASTContext &Ctx, SourceLoc AtLoc,
                                   SourceLoc ObjCLoc, SourceLoc LParenLoc, 
                                   SourceLoc NameLoc, Identifier Name,
                                   SourceLoc RParenLoc) {
-  unsigned size = sizeof(ObjCAttr) + 3 * sizeof(SourceLoc);
-  void *mem = Ctx.Allocate(size, alignof(ObjCAttr));
+  void *mem = Ctx.Allocate(totalSizeToAlloc<SourceLoc>(3), alignof(ObjCAttr));
   return new (mem) ObjCAttr(AtLoc, SourceRange(ObjCLoc),
                             ObjCSelector(Ctx, 0, Name),
                             SourceRange(LParenLoc, RParenLoc),
@@ -574,8 +633,8 @@ ObjCAttr *ObjCAttr::createSelector(ASTContext &Ctx, SourceLoc AtLoc,
                                    ArrayRef<Identifier> Names,
                                    SourceLoc RParenLoc) {
   assert(NameLocs.size() == Names.size());
-  unsigned size = sizeof(ObjCAttr) + (NameLocs.size() + 2) * sizeof(SourceLoc);
-  void *mem = Ctx.Allocate(size, alignof(ObjCAttr));
+  void *mem = Ctx.Allocate(totalSizeToAlloc<SourceLoc>(NameLocs.size() + 2),
+                           alignof(ObjCAttr));
   return new (mem) ObjCAttr(AtLoc, SourceRange(ObjCLoc),
                             ObjCSelector(Ctx, Names.size(), Names),
                             SourceRange(LParenLoc, RParenLoc),
@@ -616,9 +675,9 @@ ObjCAttr *ObjCAttr::clone(ASTContext &context) const {
 
 AvailableAttr *
 AvailableAttr::createUnconditional(ASTContext &C,
-                                      StringRef Message,
-                                      StringRef Rename,
-                                      UnconditionalAvailabilityKind Reason) {
+                                   StringRef Message,
+                                   StringRef Rename,
+                                   UnconditionalAvailabilityKind Reason) {
   assert(Reason != UnconditionalAvailabilityKind::None);
   clang::VersionTuple NoVersion;
   return new (C) AvailableAttr(
@@ -638,6 +697,7 @@ bool AvailableAttr::isUnconditionallyUnavailable() const {
 
   case UnconditionalAvailabilityKind::Unavailable:
   case UnconditionalAvailabilityKind::UnavailableInSwift:
+  case UnconditionalAvailabilityKind::UnavailableInCurrentSwift:
     return true;
   }
 }
@@ -647,6 +707,7 @@ bool AvailableAttr::isUnconditionallyDeprecated() const {
   case UnconditionalAvailabilityKind::None:
   case UnconditionalAvailabilityKind::Unavailable:
   case UnconditionalAvailabilityKind::UnavailableInSwift:
+  case UnconditionalAvailabilityKind::UnavailableInCurrentSwift:
     return false;
 
   case UnconditionalAvailabilityKind::Deprecated:
@@ -679,4 +740,26 @@ const AvailableAttr *AvailableAttr::isUnavailable(const Decl *D) {
   return D->getAttrs().getUnavailable(ctx);
 }
 
+SpecializeAttr::SpecializeAttr(SourceLoc atLoc, SourceRange range,
+                               ArrayRef<TypeLoc> typeLocs)
+    : DeclAttribute(DAK_Specialize, atLoc, range, /*Implicit=*/false),
+      numTypes(typeLocs.size())
+{
+  std::copy(typeLocs.begin(), typeLocs.end(), getTypeLocData());
+}
 
+ArrayRef<TypeLoc> SpecializeAttr::getTypeLocs() const {
+  return const_cast<SpecializeAttr*>(this)->getTypeLocs();
+}
+
+MutableArrayRef<TypeLoc> SpecializeAttr::getTypeLocs() {
+  return { this->getTypeLocData(), numTypes };
+}
+
+SpecializeAttr *SpecializeAttr::create(ASTContext &Ctx, SourceLoc atLoc,
+                                       SourceRange range,
+                                       ArrayRef<TypeLoc> typeLocs) {
+  unsigned size = sizeof(SpecializeAttr) + (typeLocs.size() * sizeof(TypeLoc));
+  void *mem = Ctx.Allocate(size, alignof(SpecializeAttr));
+  return new (mem) SpecializeAttr(atLoc, range, typeLocs);
+}

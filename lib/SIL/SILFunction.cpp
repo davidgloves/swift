@@ -25,6 +25,19 @@
 using namespace swift;
 using namespace Lowering;
 
+SILSpecializeAttr::SILSpecializeAttr(ArrayRef<Substitution> subs)
+  : numSubs(subs.size()) {
+  std::copy(subs.begin(), subs.end(), getTrailingObjects<Substitution>());
+}
+
+SILSpecializeAttr *SILSpecializeAttr::create(SILModule &M,
+                                             ArrayRef<Substitution> subs) {
+  unsigned size =
+    sizeof(SILSpecializeAttr) + (subs.size() * sizeof(Substitution));
+  void *buf = M.allocate(size, alignof(SILSpecializeAttr));
+  return ::new (buf) SILSpecializeAttr(subs);
+}
+
 SILFunction *SILFunction::create(SILModule &M, SILLinkage linkage,
                                  StringRef name,
                                  CanSILFunctionType loweredType,
@@ -76,7 +89,6 @@ SILFunction::SILFunction(SILModule &Module, SILLinkage Linkage,
     LoweredType(LoweredType),
     // FIXME: Context params should be independent of the function type.
     ContextGenericParams(contextGenericParams),
-    Location(Loc),
     DeclCtx(DC),
     DebugScope(DebugScope),
     Bare(isBareSILFunction),
@@ -88,12 +100,13 @@ SILFunction::SILFunction(SILModule &Module, SILLinkage Linkage,
     InlineStrategy(inlineStrategy),
     Linkage(unsigned(Linkage)),
     KeepAsPublic(false),
-    ForeignBody(false),
     EffectsKindAttr(E) {
   if (InsertBefore)
     Module.functions.insert(SILModule::iterator(InsertBefore), this);
   else
     Module.functions.push_back(this);
+
+  Module.removeFromZombieList(Name);
 
   // Set our BB list to have this function as its parent. This enables us to
   // splice efficiently basic blocks in between functions.
@@ -143,6 +156,11 @@ void SILFunction::setDeclContext(Decl *D) {
 
 void SILFunction::setDeclContext(Expr *E) {
   DeclCtx = dyn_cast_or_null<AbstractClosureExpr>(E);
+}
+
+bool SILFunction::hasForeignBody() const {
+  if (!hasClangNode()) return false;
+  return SILDeclRef::isClangGenerated(getClangNode());
 }
 
 void SILFunction::numberValues(llvm::DenseMap<const ValueBase*,
@@ -220,11 +238,13 @@ struct SubstDependentSILType
       params.push_back(param.map([&](CanType pt) -> CanType {
         return visit(pt);
       }));
-    
-    SILResultInfo result = t->getResult().map([&](CanType elt) -> CanType {
-        return visit(elt);
-      });
 
+    SmallVector<SILResultInfo, 4> results;
+    for (auto &result : t->getAllResults())
+      results.push_back(result.map([&](CanType pt) -> CanType {
+        return visit(pt);
+      }));
+    
     Optional<SILResultInfo> errorResult;
     if (t->hasErrorResult()) {
       errorResult = t->getErrorResult().map([&](CanType elt) -> CanType {
@@ -235,7 +255,7 @@ struct SubstDependentSILType
     return SILFunctionType::get(t->getGenericSignature(),
                                 t->getExtInfo(),
                                 t->getCalleeConvention(),
-                                params, result, errorResult,
+                                params, results, errorResult,
                                 t->getASTContext());
   }
   
@@ -266,6 +286,17 @@ SILType ArchetypeBuilder::substDependentType(SILModule &M, SILType type) {
   return doSubstDependentSILType(M,
     [&](CanType t) { return substDependentType(t)->getCanonicalType(); },
     type);
+}
+
+Type SILFunction::mapTypeOutOfContext(Type type) const {
+  return ArchetypeBuilder::mapTypeOutOfContext(getModule().getSwiftModule(),
+                                               getContextGenericParams(),
+                                               type);
+}
+
+bool SILFunction::isNoReturnFunction() const {
+  return SILType::getPrimitiveObjectType(getLoweredFunctionType())
+      .isNoReturnFunction();
 }
 
 SILBasicBlock *SILFunction::createBasicBlock() {
@@ -487,9 +518,25 @@ bool SILFunction::hasName(const char *Name) const {
   return getName() == Name;
 }
 
-  /// Helper method which returns true if the linkage of the SILFunction
-  /// indicates that the objects definition might be required outside the
-  /// current SILModule.
+/// Returns true if this function can be referenced from a fragile function
+/// body.
+bool SILFunction::hasValidLinkageForFragileRef() const {
+  // Fragile functions can reference 'static inline' functions imported
+  // from C.
+  if (hasForeignBody())
+    return true;
+
+  // If we can inline it, we can reference it.
+  if (hasValidLinkageForFragileInline())
+    return true;
+
+  // Otherwise, only public functions can be referenced.
+  return hasPublicVisibility(getLinkage());
+}
+
+/// Helper method which returns true if the linkage of the SILFunction
+/// indicates that the objects definition might be required outside the
+/// current SILModule.
 bool
 SILFunction::isPossiblyUsedExternally() const {
   return swift::isPossiblyUsedExternally(getLinkage(),

@@ -19,6 +19,8 @@ namespace SourceKit {
 
 namespace sourcekitd {
 
+extern SourceKit::UIdent KeyVersionMajor;
+extern SourceKit::UIdent KeyVersionMinor;
 extern SourceKit::UIdent KeyResults;
 extern SourceKit::UIdent KeyRequest;
 extern SourceKit::UIdent KeyCompilerArgs;
@@ -26,6 +28,8 @@ extern SourceKit::UIdent KeyOffset;
 extern SourceKit::UIdent KeySourceFile;
 extern SourceKit::UIdent KeySourceText;
 extern SourceKit::UIdent KeyModuleName;
+extern SourceKit::UIdent KeyGroupName;
+extern SourceKit::UIdent KeySynthesizedExtension;
 extern SourceKit::UIdent KeyNotification;
 extern SourceKit::UIdent KeyKeyword;
 extern SourceKit::UIdent KeyName;
@@ -39,6 +43,9 @@ extern SourceKit::UIdent KeyKind;
 extern SourceKit::UIdent KeyAccessibility;
 extern SourceKit::UIdent KeySetterAccessibility;
 extern SourceKit::UIdent KeyUSR;
+extern SourceKit::UIdent KeyOriginalUSR;
+extern SourceKit::UIdent KeyDefaultImplementationOf;
+extern SourceKit::UIdent KeyInterestedUSR;
 extern SourceKit::UIdent KeyLine;
 extern SourceKit::UIdent KeyColumn;
 extern SourceKit::UIdent KeyReceiverUSR;
@@ -55,6 +62,7 @@ extern SourceKit::UIdent KeyDocFullAsXML;
 extern SourceKit::UIdent KeyGenericParams;
 extern SourceKit::UIdent KeyGenericRequirements;
 extern SourceKit::UIdent KeyAnnotatedDecl;
+extern SourceKit::UIdent KeyFullyAnnotatedDecl;
 extern SourceKit::UIdent KeyRelatedDecls;
 extern SourceKit::UIdent KeyContext;
 extern SourceKit::UIdent KeyModuleImportDepth;
@@ -97,9 +105,11 @@ extern SourceKit::UIdent KeyNextRequestStart;
 extern SourceKit::UIdent KeyPopular;
 extern SourceKit::UIdent KeyUnpopular;
 extern SourceKit::UIdent KeyHide;
+extern SourceKit::UIdent KeySimplified;
 
 extern SourceKit::UIdent KeyIsUnavailable;
 extern SourceKit::UIdent KeyIsDeprecated;
+extern SourceKit::UIdent KeyIsOptional;
 extern SourceKit::UIdent KeyPlatform;
 extern SourceKit::UIdent KeyMessage;
 extern SourceKit::UIdent KeyIntroduced;
@@ -107,6 +117,9 @@ extern SourceKit::UIdent KeyDeprecated;
 extern SourceKit::UIdent KeyObsoleted;
 extern SourceKit::UIdent KeyRemoveCache;
 extern SourceKit::UIdent KeyTypeInterface;
+extern SourceKit::UIdent KeyTypeUsr;
+extern SourceKit::UIdent KeyContainerTypeUsr;
+extern SourceKit::UIdent KeyModuleGroups;
 
 /// \brief Used for determining the printing order of dictionary keys.
 bool compareDictKeys(SourceKit::UIdent LHS, SourceKit::UIdent RHS);

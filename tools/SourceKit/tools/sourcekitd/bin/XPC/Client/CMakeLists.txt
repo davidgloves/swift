@@ -11,12 +11,12 @@ add_sourcekit_framework(sourcekitd
   ${public_headers}
   sourcekitd.cpp tracer.cpp
   DEPENDS sourcekitdAPI
-  COMPONENT_DEPENDS support
+  LLVM_COMPONENT_DEPENDS support
   MODULEMAP module.modulemap
   INSTALL_IN_COMPONENT sourcekit-xpc-service
 )
 
-add_definitions(-DSOURCEKIT_XPCSERVICE_IDENTIFIER="SourceKitService.${SOURCEKIT_VERSION_STRING}")
+add_definitions(-DSOURCEKIT_XPCSERVICE_IDENTIFIER="com.apple.SourceKitService.${SOURCEKIT_VERSION_STRING}")
 
 if (SOURCEKIT_BUILT_STANDALONE)
   # Create the symlink necessary to find the swift stdlib.

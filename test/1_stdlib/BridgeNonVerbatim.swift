@@ -16,84 +16,46 @@
 //  outlive the array.  
 //
 //===----------------------------------------------------------------------===//
-// RUN: %target-run-stdlib-swift %s | FileCheck %s
+// RUN: %target-run-stdlib-swift %s | %FileCheck %s
 // REQUIRES: executable_test
 //
-// XFAIL: interpret
 // REQUIRES: objc_interop
 
 import Swift
 import SwiftShims
-import ObjectiveC
-
-//===--- class Tracked ----------------------------------------------------===//
-// Instead of testing with Int elements, we use this wrapper class
-// that can help us track allocations and find issues with object
-// lifetime inside Array implementations.
-var trackedCount = 0
-var nextTrackedSerialNumber = 0
-
-final class Tracked : ForwardIndexType, CustomStringConvertible {
-  required init(_ value: Int) {
-    trackedCount += 1
-    nextTrackedSerialNumber += 1
-    serialNumber = nextTrackedSerialNumber
-    self.value = value
-  }
-  
-  deinit {
-    assert(serialNumber > 0, "double destruction!")
-    trackedCount -= 1
-    serialNumber = -serialNumber
-  }
-
-  var description: String {
-    assert(serialNumber > 0, "dead Tracked!")
-    return value.description
-  }
-
-  func successor() -> Self {
-    return self.dynamicType.init(self.value.successor())
-  }
-
-  var value: Int
-  var serialNumber: Int
-}
-
-func == (x: Tracked, y: Tracked) -> Bool {
-  return x.value == y.value
-}
+import Foundation
+import StdlibUnittest
+import StdlibUnittestFoundationExtras
 
 struct X : _ObjectiveCBridgeable {
-  static func _isBridgedToObjectiveC() -> Bool {
-    return true
-  }
-  
   init(_ value: Int) {
     self.value = value
   }
 
-  static func _getObjectiveCType() -> Any.Type {
-    return Tracked.self
-  }
-
-  func _bridgeToObjectiveC() -> Tracked {
-    return Tracked(value)
+  func _bridgeToObjectiveC() -> LifetimeTracked {
+    return LifetimeTracked(value)
   }
 
   static func _forceBridgeFromObjectiveC(
-    x: Tracked,
-    inout result: X?
+    _ x: LifetimeTracked,
+    result: inout X?
   ) {
     result = X(x.value)
   }
 
   static func _conditionallyBridgeFromObjectiveC(
-    x: Tracked,
-    inout result: X?
+    _ x: LifetimeTracked,
+    result: inout X?
   ) -> Bool {
     result = X(x.value)
     return true
+  }
+
+  static func _unconditionallyBridgeFromObjectiveC(_ source: LifetimeTracked?)
+      -> X {
+    var result: X? = nil
+    _forceBridgeFromObjectiveC(source!, result: &result)
+    return result!
   }
 
   var value: Int
@@ -104,20 +66,20 @@ print("testing...")
 
 func testScope() {
   let a = [X(1), X(2), X(3)]
-  let nsx = a._buffer._asCocoaArray()
+  let nsx: NSArray = a._bridgeToObjectiveC()
 
   // construction of these tracked objects is lazy
   // CHECK-NEXT: trackedCount = 0 .
-  print("trackedCount = \(trackedCount) .")
+  print("trackedCount = \(LifetimeTracked.instances) .")
 
   // We can get a single element out
   // CHECK-NEXT: nsx[0]: 1 .
-  let one = nsx.objectAtIndex(0) as! Tracked
+  let one = nsx.object(at: 0) as! LifetimeTracked
   print("nsx[0]: \(one.value) .")
 
   // We can get the element again, but it may not have the same identity
   // CHECK-NEXT: object identity matches?
-  let anotherOne = nsx.objectAtIndex(0) as! Tracked
+  let anotherOne = nsx.object(at: 0) as! LifetimeTracked
   print("object identity matches? \(one === anotherOne)")
 
   // Because the elements come back at +0, we really don't want to
@@ -126,10 +88,11 @@ func testScope() {
 
   objects.withUnsafeMutableBufferPointer {
     // FIXME: Can't elide signature and use $0 here <rdar://problem/17770732> 
-    (inout buf: UnsafeMutableBufferPointer<Int>) -> () in
-    nsx.getObjects(
-      UnsafeMutablePointer<AnyObject>(buf.baseAddress),
-      range: _SwiftNSRange(location: 1, length: 2))
+    (buf: inout UnsafeMutableBufferPointer<Int>) -> () in
+    nsx.available_getObjects(
+      AutoreleasingUnsafeMutablePointer(buf.baseAddress!),
+      range: NSRange(location: 1, length: 2))
+    return
   }
 
   // CHECK-NEXT: getObjects yields them at +0: true
@@ -143,5 +106,5 @@ autoreleasepool() {
 }
 
 // CHECK-NEXT: leaks = 0 .
-print("leaks = \(trackedCount) .")
+print("leaks = \(LifetimeTracked.instances) .")
 

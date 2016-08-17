@@ -1,5 +1,5 @@
-// RUN: %target-swift-frontend %s -O -emit-sil | FileCheck %s
-// RUN: %target-swift-frontend %s -O -emit-sil -enable-testing | FileCheck -check-prefix=CHECK-TESTING %s
+// RUN: %target-swift-frontend %s -O -emit-sil | %FileCheck %s
+// RUN: %target-swift-frontend %s -O -emit-sil -enable-testing | %FileCheck -check-prefix=CHECK-TESTING %s
 
 // Check if cycles are removed.
 
@@ -85,13 +85,13 @@ class Other : Derived {
 
 @inline(never)
 @_semantics("optimize.sil.never") // avoid devirtualization
-func testClasses(b: Base) {
+func testClasses(_ b: Base) {
 	b.aliveMethod()
 }
 
 @inline(never)
 @_semantics("optimize.sil.never") // avoid devirtualization
-func testWithDerived(d: Derived) {
+func testWithDerived(_ d: Derived) {
 	d.baseNotCalled()
 	d.notInDerived()
 	d.calledWithSuper()
@@ -99,7 +99,7 @@ func testWithDerived(d: Derived) {
 
 @inline(never)
 @_semantics("optimize.sil.never") // avoid devirtualization
-func testWithOther(o: Other) {
+func testWithOther(_ o: Other) {
 	o.notInOther()
 }
 
@@ -130,7 +130,7 @@ struct Adopt : Prot {
 
 @inline(never)
 @_semantics("optimize.sil.never") // avoid devirtualization
-func testProtocols(p: Prot) {
+func testProtocols(_ p: Prot) {
 	p.aliveWitness()
 }
 
@@ -144,6 +144,11 @@ public func callTest() {
 	testProtocols(Adopt())
 }
 
+@_semantics("optimize.sil.never") // make sure not eliminated 
+internal func donotEliminate() {
+  return
+}
+
 // CHECK-NOT: sil {{.*}}inCycleA
 // CHECK-NOT: sil {{.*}}inCycleB
 // CHECK-NOT: sil {{.*}}deadMethod
@@ -155,6 +160,8 @@ public func callTest() {
 // CHECK-TESTING: sil {{.*}}deadMethod
 // CHECK-TESTING: sil {{.*}}publicClassMethod
 // CHECK-TESTING: sil {{.*}}deadWitness
+
+// CHECK-LABEL: @_TF25dead_function_elimination14donotEliminateFT_T_
 
 // CHECK-LABEL: sil_vtable Base
 // CHECK: aliveMethod
@@ -188,6 +195,6 @@ public func callTest() {
 // CHECK: aliveWitness!1: @{{.*}}aliveWitness
 // CHECK: deadWitness!1: nil
 
-// CHECK-TESTING-LABEL: sil_witness_table Adopt: Prot
+// CHECK-TESTING-LABEL: sil_witness_table [fragile] Adopt: Prot
 // CHECK-TESTING: deadWitness{{.*}}: @{{.*}}deadWitness
 

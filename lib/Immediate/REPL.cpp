@@ -871,11 +871,7 @@ private:
     // Make a copy of it to be able to correct produce DumpModule.
     std::unique_ptr<llvm::Module> SaveLineModule(CloneModule(LineModule.get()));
     
-    if (!linkLLVMModules(Module, LineModule.get()
-                         // TODO: reactivate the linker mode if it is
-                         // supported in llvm again. Otherwise remove the
-                         // commented code completely.
-                         /*, llvm::Linker::PreserveSource */)) {
+    if (!linkLLVMModules(Module, std::move(LineModule))) {
       return false;
     }
 
@@ -885,11 +881,7 @@ private:
 
     stripPreviouslyGenerated(*NewModule);
 
-    if (!linkLLVMModules(&DumpModule, SaveLineModule.get()
-                         // TODO: reactivate the linker mode if it is
-                         // supported in llvm again. Otherwise remove the
-                         // commented code completely.
-                         /*, llvm::Linker::DestroySource */)) {
+    if (!linkLLVMModules(&DumpModule, std::move(SaveLineModule))) {
       return false;
     }
     llvm::Function *DumpModuleMain = DumpModule.getFunction("main");
@@ -992,7 +984,8 @@ public:
     if (llvm::sys::Process::StandardInIsUserInput())
       llvm::outs() <<
           "***  You are running Swift's integrated REPL,  ***\n"
-          "***  intended for testing purposes only.       ***\n"
+          "***  intended for compiler and stdlib          ***\n"
+          "***  development and testing purposes only.    ***\n"
           "***  The full REPL is built as part of LLDB.   ***\n"
           "***  Type ':help' for assistance.              ***\n";
   }

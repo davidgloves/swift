@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend %s -emit-ir -g -o - | FileCheck %s
+// RUN: %target-swift-frontend %s -emit-ir -g -o - | %FileCheck %s
 
 // CHECK: define hidden void @_TFC12generic_arg25Class3foo{{.*}}, %swift.type* %U
 // CHECK: [[Y:%.*]] = getelementptr inbounds %C12generic_arg25Class, %C12generic_arg25Class* %2, i32 0, i32 0, i32 0
@@ -8,9 +8,9 @@
 // CHECK-NOT: dbg.value{{.*}}metadata ![[U]]
 class Class <T> {
 // CHECK: ![[U]] = !DILocalVariable(name: "y", arg: 2{{.*}} line: [[@LINE+1]],
-  func foo<U>(x: T, y: U) {}
+  func foo<U>(_ x: T, y: U) {}
 
-  func bar(x: String, y: Int64) {}
+  func bar(_ x: String, y: Int64) {}
 
   init() {}
 }

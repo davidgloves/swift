@@ -1,18 +1,10 @@
 // RUN: %target-run-stdlib-swift
 // REQUIRES: executable_test
 
-// XFAIL: interpret
-
 import StdlibUnittest
 import Swift
 import SwiftPrivate
 
-// Also import modules which are used by StdlibUnittest internally. This
-// workaround is needed to link all required libraries in case we compile
-// StdlibUnittest with -sil-serialize-all.
-#if _runtime(_ObjC)
-import ObjectiveC
-#endif
 
 //===---
 // Utilities.
@@ -22,7 +14,7 @@ import ObjectiveC
 //
 // These scalars should be "base characters" with regards to their position in
 // a grapheme cluster.
-let baseScalars = [
+let baseScalars: [UnicodeScalar] = [
   // U+0065 LATIN SMALL LETTER E
   "\u{0065}",
 
@@ -62,7 +54,7 @@ let baseScalars = [
 
 // Single Unicode scalars that are "continuing characters" with regards to
 // their position in a grapheme cluster.
-let continuingScalars = [
+let continuingScalars: [UnicodeScalar] = [
   // U+0300 COMBINING GRAVE ACCENT
   "\u{0300}",
 
@@ -100,11 +92,11 @@ let testCharacters = [
   "\u{00a9}\u{0300}\u{0300}\u{0300}\u{0300}", // UTF-8: 10 bytes
 ]
 
-func randomGraphemeCluster(minSize: Int, _ maxSize: Int) -> String {
+func randomGraphemeCluster(_ minSize: Int, _ maxSize: Int) -> String {
   let n = pickRandom((minSize + 1)..<maxSize)
-  var result = pickRandom(baseScalars)
+  var result = String(pickRandom(baseScalars))
   for _ in 0..<n {
-    result += pickRandom(continuingScalars)
+    result += String(pickRandom(continuingScalars))
   }
   return result
 }
@@ -116,25 +108,25 @@ func randomGraphemeCluster(minSize: Int, _ maxSize: Int) -> String {
 var CharacterTests = TestSuite("Character")
 
 CharacterTests.test("literal") {
-  if true {
+  do {
     // U+0041 LATIN CAPITAL LETTER A
     let ch: Character = "A"
     expectEqual("\u{0041}", String(ch))
   }
 
-  if true {
+  do {
     // U+3042 HIRAGANA LETTER A
     let ch: Character = "あ"
     expectEqual("\u{3042}", String(ch))
   }
 
-  if true {
+  do {
     // U+4F8B CJK UNIFIED IDEOGRAPH-4F8B
     let ch: Character = "例"
     expectEqual("\u{4F8B}", String(ch))
   }
 
-  if true {
+  do {
     // U+304B HIRAGANA LETTER KA
     // U+3099 COMBINING KATAKANA-HIRAGANA VOICED SOUND MARK
     let ch: Character = "\u{304b}\u{3099}"
@@ -144,13 +136,13 @@ CharacterTests.test("literal") {
 
 CharacterTests.test("sizeof") {
   // FIXME: should be 8.
-  // <rdar://problem/16754935> sizeof(Character.self) is 9, should be 8
+  // <rdar://problem/16754935> MemoryLayout<Character>.size is 9, should be 8
 
-  let size1 = sizeof(Character.self)
+  let size1 = MemoryLayout<Character>.size
   expectTrue(size1 == 8 || size1 == 9)
 
   var a: Character = "a"
-  let size2 = sizeofValue(a)
+  let size2 = MemoryLayout.size(ofValue: a)
   expectTrue(size2 == 8 || size2 == 9)
 
   expectEqual(size1, size2)
@@ -158,8 +150,8 @@ CharacterTests.test("sizeof") {
 
 CharacterTests.test("Hashable") {
   for characters in [
-    baseScalars,
-    continuingScalars,
+    baseScalars.map { String($0) },
+    continuingScalars.map { String($0) },
     testCharacters
   ] {
     for i in characters.indices {
@@ -174,7 +166,7 @@ CharacterTests.test("Hashable") {
 
 /// Test that a given `String` can be transformed into a `Character` and back
 /// without loss of information.
-func checkRoundTripThroughCharacter(s: String) {
+func checkRoundTripThroughCharacter(_ s: String) {
   let c = Character(s)
   var s2 = String(c)
   expectEqual(
@@ -183,16 +175,16 @@ func checkRoundTripThroughCharacter(s: String) {
   )
 }
 
-func isSmallRepresentation(s: String) -> Bool {
-  switch(Character(s)._representation) {
-    case .Small:
+func isSmallRepresentation(_ s: String) -> Bool {
+  switch Character(s)._representation {
+    case .small:
       return true
     default:
       return false
   }
 }
 
-func checkRepresentation(s: String) {
+func checkRepresentation(_ s: String) {
   let expectSmall = s.utf8.count <= 8
   let isSmall = isSmallRepresentation(s)
 
@@ -205,8 +197,8 @@ func checkRepresentation(s: String) {
 CharacterTests.test("RoundTripping") {
   // Single Unicode Scalar Value tests
   for s in baseScalars {
-    checkRepresentation(s)
-    checkRoundTripThroughCharacter(s)
+    checkRepresentation(String(s))
+    checkRoundTripThroughCharacter(String(s))
   }
 
   // Edge case tests
@@ -230,7 +222,7 @@ CharacterTests.test("RoundTripping/Random") {
 CharacterTests.test("forall x: ASCII . String(Character(x)) == String(x)") {
   // For all ASCII chars, constructing a Character then a String should be the
   // same as constructing a String directly.
-  let asciiDomain = Array(0..<128).map({ UnicodeScalar(Int($0)) })
+  let asciiDomain = (0..<128).map({ UnicodeScalar(Int($0))! })
   expectEqualFunctionsForDomain(asciiDomain,
     { String($0) },
     { String(Character($0)) })
@@ -241,8 +233,8 @@ CharacterTests.test(
   // For all ASCII chars, constructing a Character then a String should ordered
   // the same as constructing a String directly.
   let asciiDomain = Array(0..<127)
-  let ascii0to126 = asciiDomain.map({ UnicodeScalar(Int($0)) })
-  let ascii1to127 = asciiDomain.map({ UnicodeScalar(Int($0 + 1)) })
+  let ascii0to126 = asciiDomain.map({ UnicodeScalar(Int($0))! })
+  let ascii1to127 = asciiDomain.map({ UnicodeScalar(Int($0 + 1))! })
   typealias PredicateFn = (UnicodeScalar) -> (UnicodeScalar) -> Bool
   expectEqualMethodsForDomain(
     ascii0to126,
@@ -266,13 +258,13 @@ var UnicodeScalarTests = TestSuite("UnicodeScalar")
 
 UnicodeScalarTests.test("UInt8(ascii: UnicodeScalar)") {
   for i in 0..<0x7f {
-    let us = UnicodeScalar(i)
+    let us = UnicodeScalar(i)!
     expectEqual(UInt8(i), UInt8(ascii: us))
   }
 }
 
 UnicodeScalarTests.test("UInt8(ascii: UnicodeScalar)/non-ASCII should trap")
-  .skip(.Custom(
+  .skip(.custom(
     { _isFastAssertConfiguration() },
     reason: "this trap is not guaranteed to happen in -Ounchecked"))
   .code {
@@ -282,18 +274,18 @@ UnicodeScalarTests.test("UInt8(ascii: UnicodeScalar)/non-ASCII should trap")
 }
 
 UnicodeScalarTests.test("UInt32(_: UnicodeScalar),UInt64(_: UnicodeScalar)") {
-  for us in baseScalars.map({ $0.unicodeScalars.first! }) {
+  for us in baseScalars {
     expectEqual(us.value, UInt32(us))
     expectEqual(UInt64(us.value), UInt64(us))
   }
 }
 
 UnicodeScalarTests.test("isASCII()") {
-  expectTrue(UnicodeScalar(0).isASCII())
-  expectTrue(("A" as UnicodeScalar).isASCII())
-  expectTrue(UnicodeScalar(127).isASCII())
-  expectFalse(UnicodeScalar(128).isASCII())
-  expectFalse(UnicodeScalar(256).isASCII())
+  expectTrue(UnicodeScalar(0)!.isASCII)
+  expectTrue(("A" as UnicodeScalar).isASCII)
+  expectTrue(UnicodeScalar(127)!.isASCII)
+  expectFalse(UnicodeScalar(128)!.isASCII)
+  expectFalse(UnicodeScalar(256)!.isASCII)
 }
 
 UnicodeScalarTests.test("Comparable") {
@@ -310,6 +302,13 @@ UnicodeScalarTests.test("Comparable") {
   expectTrue("B" > CharA)
   expectTrue(CharA <= "B")
   expectTrue("B" >= CharA)
+}
+
+UnicodeScalarTests.test("LosslessStringConvertible") {
+  // FIXME: these tests are insufficient.
+
+  checkLosslessStringConvertible((0xE000...0xF000).map { UnicodeScalar(Int($0))! })
+  checkLosslessStringConvertible((0...127).map { UnicodeScalar(Int($0))! })
 }
 
 runAllTests()

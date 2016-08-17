@@ -1,11 +1,11 @@
-// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=AVAILABILITY1 | FileCheck %s -check-prefix=AVAILABILITY1
-// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=AVAILABILITY2 | FileCheck %s -check-prefix=AVAILABILITY2
-// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=KEYWORD1 | FileCheck %s -check-prefix=KEYWORD1
-// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=KEYWORD2 | FileCheck %s -check-prefix=KEYWORD2
-// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=KEYWORD3 | FileCheck %s -check-prefix=KEYWORD3
-// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=KEYWORD4 | FileCheck %s -check-prefix=KEYWORD4
-// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=KEYWORD5 | FileCheck %s -check-prefix=KEYWORD5
-// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=KEYWORD_LAST | FileCheck %s -check-prefix=KEYWORD_LAST
+// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=AVAILABILITY1 | %FileCheck %s -check-prefix=AVAILABILITY1
+// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=AVAILABILITY2 | %FileCheck %s -check-prefix=AVAILABILITY2
+// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=KEYWORD1 | %FileCheck %s -check-prefix=KEYWORD1
+// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=KEYWORD2 | %FileCheck %s -check-prefix=KEYWORD2
+// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=KEYWORD3 | %FileCheck %s -check-prefix=KEYWORD3
+// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=KEYWORD4 | %FileCheck %s -check-prefix=KEYWORD4
+// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=KEYWORD5 | %FileCheck %s -check-prefix=KEYWORD5
+// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=KEYWORD_LAST | %FileCheck %s -check-prefix=KEYWORD_LAST
 
 @available(#^AVAILABILITY1^#)
 
@@ -25,19 +25,20 @@
 
 // AVAILABILITY2:             Begin completions, 5 items
 // AVAILABILITY2-NEXT:        Keyword/None:                       unavailable; name=unavailable{{$}}
-// AVAILABILITY2-NEXT:        Keyword/None:                       message=[#Specify message#]; name=message{{$}}
-// AVAILABILITY2-NEXT:        Keyword/None:                       renamed=[#Specify replacing name#]; name=renamed{{$}}
-// AVAILABILITY2-NEXT:        Keyword/None:                       introduced=[#Specify version number#]; name=introduced{{$}}
-// AVAILABILITY2-NEXT:        Keyword/None:                       deprecated=[#Specify version number#]; name=deprecated{{$}}
+// AVAILABILITY2-NEXT:        Keyword/None:                       message: [#Specify message#]; name=message{{$}}
+// AVAILABILITY2-NEXT:        Keyword/None:                       renamed: [#Specify replacing name#]; name=renamed{{$}}
+// AVAILABILITY2-NEXT:        Keyword/None:                       introduced: [#Specify version number#]; name=introduced{{$}}
+// AVAILABILITY2-NEXT:        Keyword/None:                       deprecated: [#Specify version number#]; name=deprecated{{$}}
 // AVAILABILITY2-NEXT:        End completions
 
 
 
 func method(@#^KEYWORD1^#) {}
 
-// KEYWORD1:                  Begin completions, 2 items
+// KEYWORD1:                  Begin completions, 3 items
 // KEYWORD1-NEXT:             Keyword/None:                       autoclosure[#Param Attribute#]; name=autoclosure{{$}}
 // KEYWORD1-NEXT:             Keyword/None:                       noescape[#Param Attribute#]; name=noescape{{$}}
+// KEYWORD1-NEXT:             Keyword/None:                       escaping[#Param Attribute#]; name=escaping{{$}}
 // KEYWORD1-NEXT:             End completions
 
 @#^KEYWORD2^#
@@ -52,8 +53,8 @@ func method(){}
 // KEYWORD2-NEXT:             Keyword/None:                       NSManaged[#Func Attribute#]; name=NSManaged{{$}}
 // KEYWORD2-NEXT:             Keyword/None:                       inline[#Func Attribute#]; name=inline{{$}}
 // KEYWORD2-NEXT:             Keyword/None:                       nonobjc[#Func Attribute#]; name=nonobjc{{$}}
-// KEYWORD2-NEXT:             Keyword/None:                       warn_unused_result[#Func Attribute#]; name=warn_unused_result{{$}}
 // KEYWORD2-NEXT:             Keyword/None:                       warn_unqualified_access[#Func Attribute#]; name=warn_unqualified_access{{$}}
+// KEYWORD2-NEXT:             Keyword/None:                       discardableResult[#Func Attribute#]; name=discardableResult
 // KEYWORD2-NEXT:             End completions
 
 @#^KEYWORD3^#
@@ -89,7 +90,7 @@ struct S{}
 
 @#^KEYWORD_LAST^#
 
-// KEYWORD_LAST:                  Begin completions, 20 items
+// KEYWORD_LAST:                  Begin completions, 22 items
 // KEYWORD_LAST-NEXT:             Keyword/None:                       available[#Declaration Attribute#]; name=available{{$}}
 // KEYWORD_LAST-NEXT:             Keyword/None:                       objc[#Declaration Attribute#]; name=objc{{$}}
 // KEYWORD_LAST-NEXT:             Keyword/None:                       swift3_migration[#Declaration Attribute#]; name=swift3_migration{{$}}
@@ -108,6 +109,8 @@ struct S{}
 // KEYWORD_LAST-NEXT:             Keyword/None:                       nonobjc[#Declaration Attribute#]; name=nonobjc{{$}}
 // KEYWORD_LAST-NEXT:             Keyword/None:                       NSApplicationMain[#Declaration Attribute#]; name=NSApplicationMain{{$}}
 // KEYWORD_LAST-NEXT:             Keyword/None:                       objc_non_lazy_realization[#Declaration Attribute#]; name=objc_non_lazy_realization{{$}}
-// KEYWORD_LAST-NEXT:             Keyword/None:                       warn_unused_result[#Declaration Attribute#]; name=warn_unused_result
 // KEYWORD_LAST-NEXT:             Keyword/None:                       warn_unqualified_access[#Declaration Attribute#]; name=warn_unqualified_access
+// KEYWORD_LAST-NEXT:             Keyword/None:                       discardableResult[#Declaration Attribute#]; name=discardableResult
+// KEYWORD_LAST-NEXT:             Keyword/None:                       GKInspectable[#Declaration Attribute#]; name=GKInspectable{{$}}
+// KEYWORD_LAST-NEXT:             Keyword/None:                       escaping[#Declaration Attribute#]; name=escaping{{$}}
 // KEYWORD_LAST-NEXT:             End completions

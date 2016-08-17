@@ -133,7 +133,8 @@ private:
                                  ProtocolDecl *Proto,
                                  RequirementSource Source,
                                 llvm::SmallPtrSetImpl<ProtocolDecl *> &Visited);
-  
+
+public:
   /// \brief Add a new conformance requirement specifying that the given
   /// potential archetypes are equivalent.
   bool addSameTypeRequirementBetweenArchetypes(PotentialArchetype *T1,
@@ -145,7 +146,8 @@ private:
   bool addSameTypeRequirementToConcrete(PotentialArchetype *T,
                                         Type Concrete,
                                         RequirementSource Source);
-  
+
+private:
   /// \brief Add a new superclass requirement specifying that the given
   /// potential archetype has the given type as an ancestor.
   bool addSuperclassRequirement(PotentialArchetype *T, 
@@ -325,7 +327,7 @@ public:
   ArrayRef<ArchetypeType *> getAllArchetypes();
   
   /// Map an interface type to a contextual type.
-  static Type mapTypeIntoContext(DeclContext *dc, Type type,
+  static Type mapTypeIntoContext(const DeclContext *dc, Type type,
                                  LazyResolver *resolver = nullptr);
 
   /// Map an interface type to a contextual type.
@@ -335,7 +337,7 @@ public:
                                  LazyResolver *resolver = nullptr);
 
   /// Map a contextual type to an interface type.
-  static Type mapTypeOutOfContext(DeclContext *dc, Type type);
+  static Type mapTypeOutOfContext(const DeclContext *dc, Type type);
 
   /// Map a contextual type to an interface type.
   static Type mapTypeOutOfContext(ModuleDecl *M,
@@ -385,8 +387,10 @@ class ArchetypeBuilder::PotentialArchetype {
 
   /// \brief The name of this potential archetype or, for an
   /// associated type, the declaration of the associated type to which
-  /// this potential archetype has been resolved.
-  llvm::PointerUnion<Identifier, AssociatedTypeDecl *> NameOrAssociatedType;
+  /// this potential archetype has been resolved. Or, for a type alias,
+  /// the type alias decl.
+  llvm::PointerUnion3<Identifier, AssociatedTypeDecl *,
+                      TypeAliasDecl *> NameOrAssociatedType;
 
   /// \brief The representative of the equivalent class of potential archetypes
   /// to which this potential archetype belongs.
@@ -431,6 +435,10 @@ class ArchetypeBuilder::PotentialArchetype {
   /// the concrete type.
   unsigned RecursiveConcreteType : 1;
 
+  /// Whether we have detected recursion during the substitution of
+  /// the superclass type.
+  unsigned RecursiveSuperclassType : 1;
+
   /// Whether we have renamed this (nested) type due to typo correction.
   unsigned Renamed : 1;
 
@@ -442,7 +450,8 @@ class ArchetypeBuilder::PotentialArchetype {
   PotentialArchetype(PotentialArchetype *Parent, Identifier Name)
     : ParentOrParam(Parent), NameOrAssociatedType(Name), Representative(this),
       IsRecursive(false), Invalid(false), SubstitutingConcreteType(false),
-      RecursiveConcreteType(false), Renamed(false)
+      RecursiveConcreteType(false), RecursiveSuperclassType(false),
+      Renamed(false)
   { 
     assert(Parent != nullptr && "Not an associated type?");
     EquivalenceClass.push_back(this);
@@ -453,8 +462,19 @@ class ArchetypeBuilder::PotentialArchetype {
     : ParentOrParam(Parent), NameOrAssociatedType(AssocType), 
       Representative(this), IsRecursive(false), Invalid(false),
       SubstitutingConcreteType(false), RecursiveConcreteType(false),
-      Renamed(false)
+      RecursiveSuperclassType(false), Renamed(false)
   { 
+    assert(Parent != nullptr && "Not an associated type?");
+    EquivalenceClass.push_back(this);
+  }
+
+  /// \brief Construct a new potential archetype for a type alias.
+  PotentialArchetype(PotentialArchetype *Parent, TypeAliasDecl *TypeAlias)
+    : ParentOrParam(Parent), NameOrAssociatedType(TypeAlias),
+      Representative(this), IsRecursive(false), Invalid(false),
+      SubstitutingConcreteType(false), RecursiveConcreteType(false),
+      RecursiveSuperclassType(false), Renamed(false)
+  {
     assert(Parent != nullptr && "Not an associated type?");
     EquivalenceClass.push_back(this);
   }
@@ -466,7 +486,8 @@ class ArchetypeBuilder::PotentialArchetype {
     : ParentOrParam(GenericParam), RootProtocol(RootProtocol), 
       NameOrAssociatedType(Name), Representative(this), IsRecursive(false),
       Invalid(false), SubstitutingConcreteType(false),
-      RecursiveConcreteType(false), Renamed(false)
+      RecursiveConcreteType(false), RecursiveSuperclassType(false),
+      Renamed(false)
   {
     EquivalenceClass.push_back(this);
   }
@@ -515,6 +536,11 @@ public:
   /// archetype, if it corresponds to a generic parameter.
   GenericTypeParamType *getGenericParam() const {
     return ParentOrParam.dyn_cast<GenericTypeParamType *>(); 
+  }
+  
+  /// Retrieve the type alias.
+  TypeAliasDecl *getTypeAliasDecl() const {
+    return NameOrAssociatedType.dyn_cast<TypeAliasDecl *>();
   }
 
   /// Retrieve the set of protocols to which this type conforms.

@@ -38,9 +38,29 @@ class IRBuilder : public IRBuilderBase {
   /// ordering.
   llvm::BasicBlock *ClearedIP;
 
+#ifndef NDEBUG
+  /// Whether debug information is requested. Only used in assertions.
+  bool DebugInfo;
+#endif
+
+  // Set calling convention of the call instruction using
+  // the same calling convention as the callee function.
+  // This ensures that they are always compatible.
+  void setCallingConvUsingCallee(llvm::CallInst *Call) {
+    auto CalleeFn = Call->getCalledFunction();
+    if (CalleeFn) {
+      auto CC = CalleeFn->getCallingConv();
+      Call->setCallingConv(CC);
+    }
+  }
+
 public:
-  IRBuilder(llvm::LLVMContext &Context)
-    : IRBuilderBase(Context), ClearedIP(nullptr) {}
+  IRBuilder(llvm::LLVMContext &Context, bool DebugInfo)
+    : IRBuilderBase(Context), ClearedIP(nullptr)
+#ifndef NDEBUG
+    , DebugInfo(DebugInfo)
+#endif
+    {}
 
   /// Determines if the current location is apparently reachable.  The
   /// invariant we maintain is that the insertion point of the builder
@@ -166,12 +186,18 @@ public:
   llvm::StoreInst *CreateStore(llvm::Value *value, llvm::Value *addr) = delete;
   
   using IRBuilderBase::CreateStructGEP;
-  Address CreateStructGEP(Address address, unsigned index, Size size,
+  Address CreateStructGEP(Address address, unsigned index, Size offset,
                           const llvm::Twine &name = "") {
     llvm::Value *addr = CreateStructGEP(
         address.getType()->getElementType(), address.getAddress(),
         index, name);
-    return Address(addr, address.getAlignment().alignmentAtOffset(size));
+    return Address(addr, address.getAlignment().alignmentAtOffset(offset));
+  }
+  Address CreateStructGEP(Address address, unsigned index,
+                          const llvm::StructLayout *layout,
+                          const llvm::Twine &name = "") {
+    Size offset = Size(layout->getElementOffset(index));
+    return CreateStructGEP(address, index, offset, name);
   }
 
   /// Given a pointer to an array element, GEP to the array element
@@ -235,6 +261,37 @@ public:
   llvm::CallInst *CreateLifetimeEnd(Address buf, Size size) {
     return CreateLifetimeEnd(buf.getAddress(),
                    llvm::ConstantInt::get(Context, APInt(64, size.getValue())));
+  }
+
+  //using IRBuilderBase::CreateCall;
+
+  llvm::CallInst *CreateCall(llvm::Value *Callee, ArrayRef<llvm::Value *> Args,
+                             const Twine &Name = "",
+                             llvm::MDNode *FPMathTag = nullptr) {
+    assert((!DebugInfo || getCurrentDebugLocation()) && "no debugloc on call");
+    auto Call = IRBuilderBase::CreateCall(Callee, Args, Name, FPMathTag);
+    setCallingConvUsingCallee(Call);
+    return Call;
+  }
+
+  llvm::CallInst *CreateCall(llvm::FunctionType *FTy, llvm::Value *Callee,
+                             ArrayRef<llvm::Value *> Args,
+                             const Twine &Name = "",
+                             llvm::MDNode *FPMathTag = nullptr) {
+    assert((!DebugInfo || getCurrentDebugLocation()) && "no debugloc on call");
+    auto Call = IRBuilderBase::CreateCall(FTy, Callee, Args, Name, FPMathTag);
+    setCallingConvUsingCallee(Call);
+    return Call;
+  }
+
+  llvm::CallInst *CreateCall(llvm::Function *Callee,
+                             ArrayRef<llvm::Value *> Args,
+                             const Twine &Name = "",
+                             llvm::MDNode *FPMathTag = nullptr) {
+    assert((!DebugInfo || getCurrentDebugLocation()) && "no debugloc on call");
+    auto Call = IRBuilderBase::CreateCall(Callee, Args, Name, FPMathTag);
+    setCallingConvUsingCallee(Call);
+    return Call;
   }
 };
 

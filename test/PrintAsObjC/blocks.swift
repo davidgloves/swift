@@ -4,14 +4,15 @@
 // RUN: mkdir %t
 // RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -emit-module -o %t %s -disable-objc-attr-requires-foundation-module
 // RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -parse-as-library %t/blocks.swiftmodule -parse -emit-objc-header-path %t/blocks.h -import-objc-header %S/../Inputs/empty.h -disable-objc-attr-requires-foundation-module
-// RUN: FileCheck %s < %t/blocks.h
+// RUN: %FileCheck %s < %t/blocks.h
 // RUN: %check-in-clang %t/blocks.h
 
 // REQUIRES: objc_interop
 
 import ObjectiveC
 
-typealias MyTuple = (a: Int, b: AnyObject?)
+typealias MyTuple = (Int, AnyObject?)
+typealias MyNamedTuple = (a: Int, b: AnyObject?)
 typealias MyInt = Int
 
 // CHECK-LABEL: @interface Callbacks
@@ -26,30 +27,40 @@ typealias MyInt = Int
 // CHECK-NEXT: - (void (^ _Nullable)(NSObject * _Nonnull, NSObject * _Nonnull))returnsBlockWithTwoInputs;
 // CHECK-NEXT: - (void)blockWithTypealias:(NSInteger (^ _Nonnull)(NSInteger, id _Nullable))input;
 // CHECK-NEXT: - (void)blockWithSimpleTypealias:(NSInteger (^ _Nonnull)(NSInteger))input;
+// CHECK-NEXT: - (void)namedArguments:(void (^ _Nonnull)(float, float, double, double))input;
+// CHECK-NEXT: - (void)blockTakesNamedBlock:(void (^ _Nonnull)(void (^ _Nonnull)(void)))input;
+// CHECK-NEXT: - (void (^ _Nullable)(NSObject * _Nonnull))returnsBlockWithNamedInput;
+// CHECK-NEXT: - (void)blockWithTypealiasWithNames:(NSInteger (^ _Nonnull)(NSInteger a, id _Nullable b))input;
+// CHECK-NEXT: - (void)blockWithKeyword:(NSInteger (^ _Nonnull)(NSInteger))_Nullable_;
 // CHECK-NEXT: - (NSInteger (* _Nonnull)(NSInteger))functionPointers:(NSInteger (* _Nonnull)(NSInteger))input;
 // CHECK-NEXT: - (void)functionPointerTakesAndReturnsFunctionPointer:(NSInteger (* _Nonnull (^ _Nonnull (* _Nonnull)(NSInteger))(NSInteger))(NSInteger))input;
+// CHECK-NEXT: - (NSInteger (* _Nonnull)(NSInteger))functionPointersWithName:(NSInteger (* _Nonnull)(NSInteger))input;
 // CHECK-NEXT: @property (nonatomic, copy) NSInteger (^ _Nullable savedBlock)(NSInteger);
+// CHECK-NEXT: @property (nonatomic, copy) NSInteger (^ _Nullable savedBlockWithName)(NSInteger);
 // CHECK-NEXT: @property (nonatomic) NSInteger (* _Nonnull savedFunctionPointer)(NSInteger);
 // CHECK-NEXT: @property (nonatomic) NSInteger (* _Nullable savedFunctionPointer2)(NSInteger);
+// CHECK-NEXT: @property (nonatomic) NSInteger (* _Nonnull savedFunctionPointerWithName)(NSInteger);
+// CHECK-NEXT: @property (nonatomic, copy, getter=this, setter=setThis:) NSInteger (^ _Nonnull this_)(NSInteger);
+// CHECK-NEXT: @property (nonatomic, getter=class, setter=setClass:) NSInteger (* _Nonnull class_)(NSInteger);
 // CHECK-NEXT: init
 // CHECK-NEXT: @end
 @objc class Callbacks {
-  func voidBlocks(input: () -> ()) -> () -> () {
+  func voidBlocks(_ input: @escaping () -> ()) -> () -> () {
     return input
   }
-  func manyArguments(input: (Float, Float, Double, Double) -> ()) {}
+  func manyArguments(_ input: @escaping (Float, Float, Double, Double) -> ()) {}
 
-  func blockTakesBlock(input: (() -> ()) -> ()) {}
-  func blockReturnsBlock(input: () -> () -> ()) {}
-  func blockTakesAndReturnsBlock(input:
+  func blockTakesBlock(_ input: @escaping (() -> ()) -> ()) {}
+  func blockReturnsBlock(_ input: @escaping () -> () -> ()) {}
+  func blockTakesAndReturnsBlock(_ input:
     ((Int16) -> (UInt16)) ->
                 ((Int8) -> (UInt8))) {}
-  func blockTakesTwoBlocksAndReturnsBlock(input:
+  func blockTakesTwoBlocksAndReturnsBlock(_ input:
     ((Int16) -> (UInt16),
                  (Int32) -> (UInt32)) ->
                 ((Int8) -> (UInt8))) {}
 
-  func returnsBlockWithInput() -> (NSObject -> ())? {
+  func returnsBlockWithInput() -> ((NSObject) -> ())? {
     return nil
   }
   func returnsBlockWithParenthesizedInput() -> ((NSObject) -> ())? {
@@ -59,21 +70,42 @@ typealias MyInt = Int
     return nil
   }
 
-  func blockWithTypealias(input: MyTuple -> MyInt) {}
-  func blockWithSimpleTypealias(input: MyInt -> MyInt) {}
+  func blockWithTypealias(_ input: @escaping (MyTuple) -> MyInt) {}
+  func blockWithSimpleTypealias(_ input: @escaping (MyInt) -> MyInt) {}
 
-  func functionPointers(input: @convention(c) Int -> Int)
-      -> @convention(c) Int -> Int {
+  func namedArguments(_ input: @escaping (_ f1: Float, _ f2: Float, _ d1: Double, _ d2: Double) -> ()) {}
+  func blockTakesNamedBlock(_ input: @escaping (_ block: () -> ()) -> ()) {}
+  func returnsBlockWithNamedInput() -> ((_ object: NSObject) -> ())? {
+    return nil
+  }
+
+  func blockWithTypealiasWithNames(_ input: (MyNamedTuple) -> MyInt) {}
+
+  func blockWithKeyword(_ _Nullable: (_ `class`: Int) -> Int) {}
+
+  func functionPointers(_ input: @escaping @convention(c) (Int) -> Int)
+      -> @convention(c) (Int) -> Int {
     return input
   }
 
   func functionPointerTakesAndReturnsFunctionPointer(
-    input: @convention(c) Int -> Int
-                              -> @convention(c) Int -> Int
+    _ input: @escaping @convention(c) (Int) -> (Int)
+                              -> @convention(c) (Int) -> Int
   ) {
   }
 
-  var savedBlock: (Int -> Int)?
-  var savedFunctionPointer: @convention(c) Int -> Int = { $0 }
-  var savedFunctionPointer2: (@convention(c) Int -> Int)? = { $0 }
+  func functionPointersWithName(_ input: @escaping @convention(c) (_ value: Int) -> Int)
+      -> @convention(c) (_ result: Int) -> Int {
+    return input
+  }
+
+  var savedBlock: ((Int) -> Int)?
+  var savedBlockWithName: ((_ x: Int) -> Int)?
+  var savedFunctionPointer: @convention(c) (Int) -> Int = { $0 }
+  var savedFunctionPointer2: (@convention(c) (Int) -> Int)? = { $0 }
+  var savedFunctionPointerWithName: @convention(c) (_ x: Int) -> Int = { $0 }
+
+  // The following uses a clang keyword as the name.
+  var this: (_ block: Int) -> Int = { $0 }
+  var `class`: @convention(c) (_ function: Int) -> Int = { $0 }
 }

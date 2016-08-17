@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -emit-ir %s | FileCheck %s --check-prefix=CHECK --check-prefix=CHECK-%target-ptrsize
+// RUN: %target-swift-frontend -emit-ir %s | %FileCheck %s --check-prefix=CHECK --check-prefix=CHECK-%target-ptrsize
 
 class C {}
 
@@ -16,7 +16,7 @@ enum EMult { case X(Int64), Y(Int64) }
 @_alignment(4)
 struct CommonLayout { var x,y,z,w: Int8 }
 
-// CHECK:       @_TMPV11type_layout14TypeLayoutTest = global {{.*}} @create_generic_metadata_TypeLayoutTest
+// CHECK:       @_TMPV11type_layout14TypeLayoutTest = hidden global {{.*}} @create_generic_metadata_TypeLayoutTest
 // CHECK:       define private %swift.type* @create_generic_metadata_TypeLayoutTest
 struct TypeLayoutTest<T> {
   // -- dynamic layout, projected from metadata

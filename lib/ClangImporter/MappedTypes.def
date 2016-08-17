@@ -126,6 +126,8 @@ MAP_STDLIB_TYPE("u_int64_t", UnsignedInt, 64, "UInt64", false, DoNothing)
 // stdarg.h types.
 // FIXME: why does this not catch va_list on x86_64?
 MAP_STDLIB_TYPE("va_list", VaList, 0, "CVaListPointer", false, DoNothing)
+MAP_STDLIB_TYPE("__gnuc_va_list", VaList, 0, "CVaListPointer", false, DoNothing)
+MAP_STDLIB_TYPE("__va_list", VaList, 0, "CVaListPointer", false, DoNothing)
 
 // libkern/OSTypes.h types.
 MAP_STDLIB_TYPE("UInt", UnsignedInt, 32, "CUnsignedInt", false, DoNothing)
@@ -133,6 +135,10 @@ MAP_STDLIB_TYPE("SInt", SignedInt, 32, "CInt", false, DoNothing)
 
 // Dispatch types.
 MAP_TYPE("dispatch_block_t", Block, 0, "Dispatch", "dispatch_block_t",
+         true, DoNothing)
+MAP_TYPE("__swift_shims_dispatch_block_t", Block, 0, "Dispatch", "_DispatchBlock", 
+         true, DoNothing)
+MAP_TYPE("__swift_shims_dispatch_data_t", ObjCId, 0, "Dispatch", "dispatch_data_t",
          true, DoNothing)
 
 // Objective-C types.
@@ -159,9 +165,7 @@ MAP_STDLIB_TYPE("CFIndex", SignedWord, 0, "Int", false, DefineAndUse)
 
 // Foundation types.
 // FIXME: <rdar://problem/16074941> NSStringEncoding doesn't work on 32-bit
-MAP_STDLIB_TYPE(
-  Impl.SwiftContext.getSwiftName(KnownFoundationEntity::NSStringEncoding),
-  UnsignedWord, 0, "UInt", false, DoNothing)
+MAP_STDLIB_TYPE("NSStringEncoding", UnsignedWord, 0, "UInt", false, DoNothing)
 
 #undef MAP_STDLIB_TYPE
 #undef MAP_TYPE

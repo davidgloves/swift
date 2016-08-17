@@ -86,6 +86,7 @@ private:
   const LoadableTypeInfo *NativeObjectTI = nullptr;
   const LoadableTypeInfo *UnknownObjectTI = nullptr;
   const LoadableTypeInfo *BridgeObjectTI = nullptr;
+  const LoadableTypeInfo *RawPointerTI = nullptr;
   const LoadableTypeInfo *WitnessTablePtrTI = nullptr;
   const LoadableTypeInfo *TypeMetadataPtrTI = nullptr;
   const LoadableTypeInfo *ObjCClassPtrTI = nullptr;
@@ -116,7 +117,7 @@ private:
   TypeCacheEntry convertType(CanType T);
   TypeCacheEntry convertAnyNominalType(CanType T, NominalTypeDecl *D);
   const TypeInfo *convertTupleType(TupleType *T);
-  const TypeInfo *convertClassType(ClassDecl *D);
+  const TypeInfo *convertClassType(CanType type, ClassDecl *D);
   const TypeInfo *convertEnumType(TypeBase *key, CanType type, EnumDecl *D);
   const TypeInfo *convertStructType(TypeBase *key, CanType type, StructDecl *D);
   const TypeInfo *convertFunctionType(SILFunctionType *T);
@@ -144,10 +145,10 @@ public:
   TypeCacheEntry getTypeEntry(CanType type);
   const TypeInfo &getCompleteTypeInfo(CanType type);
   const TypeInfo *tryGetCompleteTypeInfo(CanType type);
-  const TypeInfo &getTypeInfo(ClassDecl *D);
   const LoadableTypeInfo &getNativeObjectTypeInfo();
   const LoadableTypeInfo &getUnknownObjectTypeInfo();
   const LoadableTypeInfo &getBridgeObjectTypeInfo();
+  const LoadableTypeInfo &getRawPointerTypeInfo();
   const LoadableTypeInfo &getTypeMetadataPtrTypeInfo();
   const LoadableTypeInfo &getObjCClassPtrTypeInfo();
   const LoadableTypeInfo &getWitnessTablePtrTypeInfo();
@@ -235,24 +236,6 @@ public:
 /// Generate code to verify that static type assumptions agree with the runtime.
 void emitTypeLayoutVerifier(IRGenFunction &IGF,
                             ArrayRef<CanType> formalTypes);
-
-/// Build a value witness that initializes an array front-to-back.
-void emitInitializeArrayFrontToBack(IRGenFunction &IGF,
-                                    const TypeInfo &type,
-                                    Address destArray,
-                                    Address srcArray,
-                                    llvm::Value *count,
-                                    SILType T,
-                                    IsTake_t take);
-
-/// Build a value witness that initializes an array back-to-front.
-void emitInitializeArrayBackToFront(IRGenFunction &IGF,
-                                    const TypeInfo &type,
-                                    Address destArray,
-                                    Address srcArray,
-                                    llvm::Value *count,
-                                    SILType T,
-                                    IsTake_t take);
 
 /// If a type is visibly a singleton aggregate (a tuple with one element, a
 /// struct with one field, or an enum with a single payload case), return the

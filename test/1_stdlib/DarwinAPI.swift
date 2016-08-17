@@ -5,13 +5,6 @@
 
 import StdlibUnittest
 
-// Also import modules which are used by StdlibUnittest internally. This
-// workaround is needed to link all required libraries in case we compile
-// StdlibUnittest with -sil-serialize-all.
-import SwiftPrivate
-#if _runtime(_ObjC)
-import ObjectiveC
-#endif
 
 import Foundation
 
@@ -22,15 +15,15 @@ DarwinBooleanAPI.test("init") {
     let nativeTrue = true
     let true1 = DarwinBoolean(nativeTrue)
     let true2: DarwinBoolean = true
-    expectEqual(1, unsafeBitCast(true1, UInt8.self))
-    expectEqual(1, unsafeBitCast(true2, UInt8.self))
+    expectEqual(1, unsafeBitCast(true1, to: UInt8.self))
+    expectEqual(1, unsafeBitCast(true2, to: UInt8.self))
   }
   do {
     let nativeFalse = false
     let false1 = DarwinBoolean(nativeFalse)
     let false2: DarwinBoolean = false
-    expectEqual(0, unsafeBitCast(false1, UInt8.self))
-    expectEqual(0, unsafeBitCast(false2, UInt8.self))
+    expectEqual(0, unsafeBitCast(false1, to: UInt8.self))
+    expectEqual(0, unsafeBitCast(false2, to: UInt8.self))
   }
 }
 
@@ -50,16 +43,15 @@ DarwinBooleanAPI.test("boolValue") {
 
 DarwinBooleanAPI.test("boolValue/extra values") {
   let rawValue: UInt8 = 2
-  let otherValue = unsafeBitCast(rawValue, DarwinBoolean.self)
+  let otherValue = unsafeBitCast(rawValue, to: DarwinBoolean.self)
   expectTrue(otherValue.boolValue)
 }
 
-DarwinBooleanAPI.test("BooleanType") {
+DarwinBooleanAPI.test("Boolean") {
   var trueValue: DarwinBoolean = true
-  expectIsBooleanType(&trueValue)
 
   var success = false
-  if trueValue {
+  if trueValue.boolValue {
     success = true
   } else {
     expectUnreachable()
@@ -87,7 +79,7 @@ DarwinBooleanAPI.test("Equatable/extra values") {
   let trueValue: DarwinBoolean = true
   let falseValue: DarwinBoolean = false
   let rawValue: UInt8 = 2
-  let otherValue = unsafeBitCast(rawValue, DarwinBoolean.self)
+  let otherValue = unsafeBitCast(rawValue, to: DarwinBoolean.self)
   checkEquatable(true, trueValue, otherValue)
   checkEquatable(false, falseValue, otherValue)
 }
@@ -96,20 +88,26 @@ DarwinBooleanAPI.test("&&") {
   let trueValue: DarwinBoolean = true
   let falseValue: DarwinBoolean = false
 
-  expectTrue(trueValue && trueValue)
-  expectFalse(trueValue && falseValue)
-  expectFalse(falseValue && trueValue)
-  expectFalse(falseValue && falseValue)
+  expectTrue(trueValue.boolValue && trueValue.boolValue)
+  expectFalse(trueValue.boolValue && falseValue.boolValue)
+  expectFalse(falseValue.boolValue && trueValue.boolValue)
+  expectFalse(falseValue.boolValue && falseValue.boolValue)
 }
 
 DarwinBooleanAPI.test("||") {
   let trueValue: DarwinBoolean = true
   let falseValue: DarwinBoolean = false
 
-  expectTrue(trueValue || trueValue)
-  expectTrue(trueValue || falseValue)
-  expectTrue(falseValue || trueValue)
-  expectFalse(falseValue || falseValue)
+  expectTrue(trueValue.boolValue || trueValue.boolValue)
+  expectTrue(trueValue.boolValue || falseValue.boolValue)
+  expectTrue(falseValue.boolValue || trueValue.boolValue)
+  expectFalse(falseValue.boolValue || falseValue.boolValue)
 }
+
+var DarwinIoctlConstants = TestSuite("DarwinIoctlConstants")
+
+DarwinIoctlConstants.test("tty ioctl constants availability") {
+  let aConstant = TIOCGWINSZ
+} 
 
 runAllTests()

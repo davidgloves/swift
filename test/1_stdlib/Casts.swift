@@ -13,64 +13,80 @@
 /// Contains tests for conversions between types which shouldn't trap.
 ///
 // -----------------------------------------------------------------------------
-// RUN: %target-run-stdlib-swift
+// RUN: %target-run-simple-swift
 // REQUIRES: executable_test
 
 import StdlibUnittest
-
-// Also import modules which are used by StdlibUnittest internally. This
-// workaround is needed to link all required libraries in case we compile
-// StdlibUnittest with -sil-serialize-all.
 #if _runtime(_ObjC)
-import ObjectiveC
+import Foundation
 #endif
 
 let CastsTests = TestSuite("Casts")
 
 // Test for SR-426: missing release for some types after failed conversion
-class DeinitTester {
-    private let onDeinit: () -> ()
-    
-    init(onDeinit: () -> ()) {
-        self.onDeinit = onDeinit
-    }
-    deinit {
-        onDeinit()
-    }
-}
-
-func testFailedTupleCast(onDeinit: () -> ()) {
-    // This function is to establish a scope for t to 
-    // be deallocated at the end of.
-    let t: Any = (1, DeinitTester(onDeinit: onDeinit))
-    _ = t is Any.Type
-}
-
 CastsTests.test("No leak for failed tuple casts") {
-    var deinitRan = false
-    testFailedTupleCast {
-        deinitRan = true
-    }
-    expectTrue(deinitRan)
+    let t: Any = (1, LifetimeTracked(0))
+    expectFalse(t is Any.Type)
 }
 
 protocol P {}
-class ErrClass : ErrorType { }
+class ErrClass : Error { }
 
 CastsTests.test("No overrelease of existential boxes in failed casts") {
     // Test for crash from SR-392
     // We fail casts of an existential box repeatedly
     // to ensure it does not get over-released.
-    func bar<T>(t: T) {
-        for i in 0..<10 {
+    func bar<T>(_ t: T) {
+        for _ in 0..<10 {
             if case let a as P = t {
                 _ = a
             }
         }
     }
     
-    let err: ErrorType = ErrClass()
+    let err: Error = ErrClass()
     bar(err)
 }
+
+extension Int : P {}
+
+#if _runtime(_ObjC)
+extension CFBitVector : P {
+  static func makeImmutable(from values: Array<UInt8>) -> CFBitVector {
+    return CFBitVectorCreate(/*allocator:*/ nil, values, values.count * 8)
+  }
+}
+
+extension CFMutableBitVector {
+  static func makeMutable(from values: Array<UInt8>) -> CFMutableBitVector {
+    return CFBitVectorCreateMutableCopy(
+      /*allocator:*/ nil,
+      /*capacity:*/ 0,
+      CFBitVector.makeImmutable(from: values))
+  }
+}
+
+func isP<T>(_ t: T) -> Bool {
+  return t is P
+}
+
+CastsTests.test("Dynamic casts of CF types to protocol existentials")
+  .skip(.custom(
+    { !_isDebugAssertConfiguration() },
+    reason: "This test behaves unpredictably in optimized mode."))
+  .code {
+  expectTrue(isP(10 as Int))
+
+  // FIXME: SR-2289: dynamic casting of CF types to protocol existentials
+  // should work, but there is a bug in the runtime that prevents them from
+  // working.
+  expectFailure {
+    expectTrue(isP(CFBitVector.makeImmutable(from: [10, 20])))
+  }
+  expectFailure {
+    expectTrue(isP(CFMutableBitVector.makeMutable(from: [10, 20])))
+  }
+}
+#endif
 
 runAllTests()

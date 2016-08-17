@@ -34,11 +34,14 @@ namespace swift {
 
 namespace immediate {
 
-bool loadSwiftRuntime(StringRef runtimeLibPath);
+// Returns a handle to the runtime suitable for other 'dlsym' or 'dlclose' 
+// calls or 'NULL' if an error occurred.
+void *loadSwiftRuntime(StringRef runtimeLibPath);
 bool tryLoadLibraries(ArrayRef<LinkLibrary> LinkLibraries,
                       SearchPathOptions SearchPathOpts,
                       DiagnosticEngine &Diags);
-bool linkLLVMModules(llvm::Module *Module, llvm::Module *SubModule);
+bool linkLLVMModules(llvm::Module *Module,
+                     std::unique_ptr<llvm::Module> SubModule);
 bool IRGenImportedModules(
     CompilerInstance &CI,
     llvm::Module &Module,

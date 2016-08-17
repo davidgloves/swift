@@ -187,6 +187,10 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
     return false;
   }
 
+  bool visitPrecedenceGroupDecl(PrecedenceGroupDecl *PGD) {
+    return false;
+  }
+
   bool visitTypeAliasDecl(TypeAliasDecl *TAD) {
     if (doIt(TAD->getUnderlyingTypeLoc()))
       return true;
@@ -198,7 +202,7 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
   }
 
   bool visitNominalTypeDecl(NominalTypeDecl *NTD) {
-    if(auto GPS = NTD->getGenericParams()) {
+    if (auto GPS = NTD->getGenericParams()) {
       for (auto GP : GPS->getParams()) {
         if (doIt(GP))
           return true;
@@ -240,7 +244,7 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
       for (auto &P : AFD->getGenericParams()->getParams()) {
         if (doIt(P))
           return true;
-        for(auto Inherit : P->getInherited()) {
+        for (auto Inherit : P->getInherited()) {
           if (doIt(Inherit))
             return true;
         }
@@ -336,7 +340,7 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
       }                                                    \
       return NODE;                                         \
     }                                                      \
-  } while(false)
+  } while (false)
 
   Expr *visitErrorExpr(ErrorExpr *E) { return E; }
   Expr *visitCodeCompletionExpr(CodeCompletionExpr *E) { return E; }
@@ -355,14 +359,6 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
   }
   
   Expr *visitOverloadedDeclRefExpr(OverloadedDeclRefExpr *E) { return E; }
-  Expr *visitOverloadedMemberRefExpr(OverloadedMemberRefExpr *E) {
-    if (auto base = doIt(E->getBase())) {
-      E->setBase(base);
-      return E;
-    }
-
-    return nullptr;
-  }
   Expr *visitUnresolvedDeclRefExpr(UnresolvedDeclRefExpr *E) { return E; }
 
   Expr *visitUnresolvedMemberExpr(UnresolvedMemberExpr *E) { 
@@ -430,7 +426,7 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
     }
     return nullptr;
   }
-    
+
   Expr *visitDynamicMemberRefExpr(DynamicMemberRefExpr *E) {
     if (Expr *Base = doIt(E->getBase())) {
       E->setBase(Base);
@@ -525,13 +521,39 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
     }
     return nullptr;
   }
-  
+
   Expr *visitImplicitConversionExpr(ImplicitConversionExpr *E) {
     if (Expr *E2 = doIt(E->getSubExpr())) {
       E->setSubExpr(E2);
       return E;
     }
     return nullptr;
+  }
+  
+  Expr *visitCollectionUpcastConversionExpr(CollectionUpcastConversionExpr *E) {
+    if (Expr *E2 = doIt(E->getSubExpr())) {
+      E->setSubExpr(E2);
+    } else {
+      return nullptr;
+    }
+
+    if (auto &keyConv = E->getKeyConversion()) {
+      if (Expr *E2 = doIt(keyConv.Conversion)) {
+        E->setKeyConversion({keyConv.OrigValue, E2});
+      } else {
+        return nullptr;
+      }
+    }
+
+    if (auto &valueConv = E->getValueConversion()) {
+      if (Expr *E2 = doIt(valueConv.Conversion)) {
+        E->setValueConversion({valueConv.OrigValue, E2});
+      } else {
+        return nullptr;
+      }
+    }
+
+    return E;
   }
   
   Expr *visitTupleShuffleExpr(TupleShuffleExpr *E) {
@@ -709,6 +731,20 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
     return E;
   }
 
+  Expr *visitArrowExpr(ArrowExpr *E) {
+    if (Expr *Args = E->getArgsExpr()) {
+      Args = doIt(Args);
+      if (!Args) return nullptr;
+      E->setArgsExpr(Args);
+    }
+    if (Expr *Result = E->getResultExpr()) {
+      Result = doIt(Result);
+      if (!Result) return nullptr;
+      E->setResultExpr(Result);
+    }
+    return E;
+  }
+
   Expr *visitRebindSelfInConstructorExpr(RebindSelfInConstructorExpr *E) {
     Expr *Sub = doIt(E->getSubExpr());
     if (!Sub) return nullptr;
@@ -731,6 +767,16 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
     }
     
     return AE;
+  }
+  
+  Expr *visitEnumIsCaseExpr(EnumIsCaseExpr *E) {
+    if (Expr *Sub = E->getSubExpr()) {
+      if (!(Sub = doIt(Sub)))
+        return nullptr;
+      E->setSubExpr(Sub);
+    }
+    
+    return E;
   }
   
   
@@ -816,6 +862,11 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
     if (!sub) return nullptr;
 
     E->setSubExpr(sub);
+    return E;
+  }
+
+  Expr *visitObjCKeyPathExpr(ObjCKeyPathExpr *E) {
+    HANDLE_SEMANTIC_EXPR(E);
     return E;
   }
 
@@ -1239,10 +1290,10 @@ Stmt *Traversal::visitForEachStmt(ForEachStmt *S) {
       return nullptr;
   }
 
-  // The generator decl is built directly on top of the sequence
+  // The iterator decl is built directly on top of the sequence
   // expression, so don't visit both.
-  if (PatternBindingDecl *Generator = S->getGenerator()) {
-    if (doIt(Generator))
+  if (PatternBindingDecl *Iterator = S->getIterator()) {
+    if (doIt(Iterator))
       return nullptr;
 
   } else if (Expr *Sequence = S->getSequence()) {
@@ -1252,9 +1303,9 @@ Stmt *Traversal::visitForEachStmt(ForEachStmt *S) {
       return nullptr;
   }
 
-  if (auto GeneratorNext = S->getGeneratorNext()) {
-    if ((GeneratorNext = doIt(GeneratorNext)))
-      S->setGeneratorNext(GeneratorNext);
+  if (auto IteratorNext = S->getIteratorNext()) {
+    if ((IteratorNext = doIt(IteratorNext)))
+      S->setIteratorNext(IteratorNext);
     else
       return nullptr;
   }
@@ -1359,16 +1410,6 @@ Pattern *Traversal::visitIsPattern(IsPattern *P) {
   if (!P->isImplicit())
     if (doIt(P->getCastTypeLoc()))
       return nullptr;
-  return P;
-}
-
-Pattern *Traversal::visitNominalTypePattern(NominalTypePattern *P) {
-  for (auto &elt : P->getMutableElements()) {
-    if (Pattern *newSub = doIt(elt.getSubPattern()))
-      elt.setSubPattern(newSub);
-    else
-      return nullptr;
-  }
   return P;
 }
 

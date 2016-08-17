@@ -57,7 +57,7 @@ enum class MethodDispatch {
 MethodDispatch getMethodDispatch(AbstractFunctionDecl *method);
 
 /// True if calling the given method or property should use ObjC dispatch.
-bool requiresObjCDispatch(ValueDecl *vd);
+bool requiresForeignEntryPoint(ValueDecl *vd);
 
 /// True if the entry point is natively foreign.
 bool requiresForeignToNativeThunk(ValueDecl *vd);
@@ -116,6 +116,10 @@ struct SILDeclRef {
 
     /// References the generator for a default argument of a function.
     DefaultArgGenerator,
+
+    /// References the initializer expression for a stored property
+    /// of a nominal type.
+    StoredPropertyInitializer,
 
     /// References the ivar initializer for the ClassDecl in loc.
     ///
@@ -261,9 +265,16 @@ struct SILDeclRef {
   bool isDefaultArgGenerator() const {
     return kind == Kind::DefaultArgGenerator;
   }
+  /// True if the SILDeclRef references the initializer for a stored property
+  /// of a nominal type.
+  bool isStoredPropertyInitializer() const {
+    return kind == Kind::StoredPropertyInitializer;
+  }
   
   /// \brief True if the function should be treated as transparent.
   bool isTransparent() const;
+  /// \brief True if the function should have its body serialized.
+  bool isFragile() const;
   /// \brief True if the function has noinline attribute.
   bool isNoinline() const;
   /// \brief True if the function has __always inline attribute.
@@ -373,6 +384,7 @@ struct SILDeclRef {
   /// True if the referenced entity is emitted by Clang on behalf of the Clang
   /// importer.
   bool isClangGenerated() const;
+  static bool isClangGenerated(ClangNode node);
 
   bool isImplicit() const {
     if (hasDecl())

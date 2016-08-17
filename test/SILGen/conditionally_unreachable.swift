@@ -1,8 +1,8 @@
-// RUN: %target-swift-frontend -emit-silgen -parse-stdlib -primary-file %s | FileCheck %s -check-prefix=RAW
-// RUN: %target-swift-frontend -emit-sil -assert-config Debug -parse-stdlib -primary-file %s | FileCheck -check-prefix=DEBUG %s
-// RUN: %target-swift-frontend -emit-sil -O -assert-config Debug -parse-stdlib -primary-file %s | FileCheck -check-prefix=DEBUG %s
-// RUN: %target-swift-frontend -emit-sil -assert-config Release -parse-stdlib -primary-file %s | FileCheck -check-prefix=RELEASE %s
-// RUN: %target-swift-frontend -emit-sil -O -assert-config Release -parse-stdlib -primary-file %s | FileCheck -check-prefix=RELEASE %s
+// RUN: %target-swift-frontend -emit-silgen -parse-stdlib -primary-file %s | %FileCheck %s -check-prefix=RAW
+// RUN: %target-swift-frontend -emit-sil -assert-config Debug -parse-stdlib -primary-file %s | %FileCheck -check-prefix=DEBUG %s
+// RUN: %target-swift-frontend -emit-sil -O -assert-config Debug -parse-stdlib -primary-file %s | %FileCheck -check-prefix=DEBUG %s
+// RUN: %target-swift-frontend -emit-sil -assert-config Release -parse-stdlib -primary-file %s | %FileCheck -check-prefix=RELEASE %s
+// RUN: %target-swift-frontend -emit-sil -O -assert-config Release -parse-stdlib -primary-file %s | %FileCheck -check-prefix=RELEASE %s
 
 import Swift
 
@@ -26,7 +26,7 @@ func condUnreachable() {
 // DEBUG-LABEL: sil hidden @_TF25conditionally_unreachable15condUnreachableFT_T_ 
 // DEBUG-NOT:     cond_br
 // DEBUG:         function_ref @foo
-// DEBUG-NOT:     unreachable
+// DEBUG-NOT:     {{ unreachable}}
 // DEBUG:         return
 
 // RELEASE-LABEL: sil hidden @_TF25conditionally_unreachable15condUnreachableFT_T_ 
@@ -34,4 +34,4 @@ func condUnreachable() {
 // RELEASE-NOT:     function_ref @foo
 // RELEASE-NOT:     return
 // RELEASE-NOT:     builtin
-// RELEASE:         unreachable
+// RELEASE:         {{ unreachable}}

@@ -18,6 +18,7 @@
 #ifndef SWIFT_AST_SILOPTIONS_H
 #define SWIFT_AST_SILOPTIONS_H
 
+#include "llvm/ADT/StringRef.h"
 #include <string>
 #include <climits>
 
@@ -60,6 +61,11 @@ public:
   /// Controls whether the SIL ARC optimizations are run.
   bool EnableARCOptimizations = true;
 
+  /// Should we run any SIL performance optimizations
+  ///
+  /// Useful when you want to enable -O LLVM opts but not -O SIL opts.
+  bool DisableSILPerfOptimizations = false;
+
   /// Controls whether or not paranoid verification checks are run.
   bool VerifyAll = false;
 
@@ -75,9 +81,9 @@ public:
   enum AssertConfiguration: unsigned {
     // Used by standard library code to distinguish between a debug and release
     // build.
-    Debug = 0,   // Enables all asserts.
-    Release = 1, // Disables asserts.
-    Fast = 2,    // Disables asserts, library precondition, and runtime checks.
+    Debug = 0,     // Enables all asserts.
+    Release = 1,   // Disables asserts.
+    Unchecked = 2, // Disables asserts, preconditions, and runtime checks.
 
     // Leave the assert_configuration instruction around.
     DisableReplacement = UINT_MAX
@@ -96,11 +102,14 @@ public:
   bool EmitProfileCoverageMapping = false;
 
   /// Should we use a pass pipeline passed in via a json file? Null by default.
-  StringRef ExternalPassPipelineFilename;
+  llvm::StringRef ExternalPassPipelineFilename;
   
   /// Emit captures and function contexts using +0 caller-guaranteed ARC
   /// conventions.
   bool EnableGuaranteedClosureContexts = false;
+
+  /// The name of the SIL outputfile if compiled with SIL debugging (-gsil).
+  std::string SILOutputFileNameForDebugging;
 };
 
 } // end namespace swift

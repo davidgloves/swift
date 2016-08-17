@@ -10,7 +10,7 @@ var rootView = View()
 var v = [View(), View()]
 rootView.subviews = v
 
-rootView.subviews as! [View]
+_ = rootView.subviews as! [View]
 
 for view in rootView.subviews as! [View] {
   doFoo()
@@ -18,16 +18,16 @@ for view in rootView.subviews as! [View] {
 
 // FIXME: Diagnostic below should be "'AnyObject' is not convertible to
 // 'View'", but IUO type gets in the way of proper diagnosis.
-for view:View in rootView.subviews { // expected-error{{type 'Array<AnyObject>!' does not conform to protocol 'SequenceType'}}
+for view:View in rootView.subviews { // expected-error{{type 'Array<AnyObject>!' does not conform to protocol 'Sequence'}}
   doFoo()
 }
 
-(rootView.subviews!) as! [View]
+_ = (rootView.subviews!) as! [View]
 
-(rootView.subviews) as! [View]
+_ = (rootView.subviews) as! [View]
 
 var ao: [AnyObject] = []
-ao as! [View] // works
+_ = ao as! [View] // works
 
 
 var b = Array<(String, Int)>()

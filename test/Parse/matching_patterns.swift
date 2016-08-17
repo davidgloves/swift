@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift -enable-experimental-patterns -I %S/Inputs -enable-source-import
+// RUN: %target-parse-verify-swift -I %S/Inputs -enable-source-import
 
 import imported_enums
 
@@ -10,10 +10,10 @@ func ~= (x: (Int,Int,Int), y: (Int,Int,Int)) -> Bool {
 
 var x:Int
 
-func square(x: Int) -> Int { return x*x }
+func square(_ x: Int) -> Int { return x*x }
 
 struct A<B> {
-  struct C<D> { } // expected-error{{generic type 'C' nested in type}}
+  struct C<D> { } // expected-error{{generic type 'C' cannot be nested in type 'A'}}
 }
 
 switch x {
@@ -54,7 +54,7 @@ case _:
 }
 
 
-var e : protocol<> = 0
+var e : Any = 0
 
 switch e {
 // 'is' pattern.
@@ -77,31 +77,31 @@ enum Voluntary<T> : Equatable {
   case Twain(T, T)
 
 
-  func enumMethod(other: Voluntary<T>, foo: Foo) {
+  func enumMethod(_ other: Voluntary<T>, foo: Foo) {
     switch self {
     case other:
       ()
 
-    case Naught,
-         Naught(),
-         Naught(_, _): // expected-error{{tuple pattern has the wrong length for tuple type '()'}}
+    case .Naught,
+         .Naught(),
+         .Naught(_, _): // expected-error{{tuple pattern has the wrong length for tuple type '()'}}
       ()
 
-    case Mere,
-         Mere(), // expected-error{{tuple pattern cannot match values of the non-tuple type 'T'}}
-         Mere(_),
-         Mere(_, _): // expected-error{{tuple pattern cannot match values of the non-tuple type 'T'}}
+    case .Mere,
+         .Mere(), // expected-error{{tuple pattern cannot match values of the non-tuple type 'T'}}
+         .Mere(_),
+         .Mere(_, _): // expected-error{{tuple pattern cannot match values of the non-tuple type 'T'}}
       ()
 
-    case Twain(), // expected-error{{tuple pattern has the wrong length for tuple type '(T, T)'}}
-         Twain(_),
-         Twain(_, _),
-         Twain(_, _, _): // expected-error{{tuple pattern has the wrong length for tuple type '(T, T)'}}
+    case .Twain(), // expected-error{{tuple pattern has the wrong length for tuple type '(T, T)'}}
+         .Twain(_),
+         .Twain(_, _),
+         .Twain(_, _, _): // expected-error{{tuple pattern has the wrong length for tuple type '(T, T)'}}
       ()
     }
 
     switch foo {
-    case Naught: // expected-error{{enum case 'Naught' is not a member of type 'Foo'}}
+    case .Naught: // expected-error{{enum case 'Naught' not found in type 'Foo'}}
       ()
     case .A, .B, .C:
       ()
@@ -143,15 +143,15 @@ case .Foo: // expected-error{{enum case 'Foo' not found in type 'Int'}}
 }
 
 struct ContainsEnum {
-  enum Possible<T> { // expected-error{{generic type 'Possible' nested in type}}
+  enum Possible<T> { // expected-error{{generic type 'Possible' cannot be nested in type 'ContainsEnum'}}
     case Naught
     case Mere(T)
     case Twain(T, T)
   }
 
-  func member(n: Possible<Int>) {
+  func member(_ n: Possible<Int>) {
     switch n {
-    case ContainsEnum.Possible<Int>.Naught,
+    case ContainsEnum.Possible<Int>.Naught, // expected-error{{cannot specialize a non-generic definition}} expected-note {{while parsing this '<' as a type parameter bracket}}
          ContainsEnum.Possible.Naught,
          Possible<Int>.Naught,
          Possible.Naught,
@@ -161,9 +161,9 @@ struct ContainsEnum {
   }
 }
 
-func nonmemberAccessesMemberType(n: ContainsEnum.Possible<Int>) {
+func nonmemberAccessesMemberType(_ n: ContainsEnum.Possible<Int>) {
   switch n {
-  case ContainsEnum.Possible<Int>.Naught,
+  case ContainsEnum.Possible<Int>.Naught, // expected-error{{cannot specialize a non-generic definition}} expected-note {{while parsing this '<' as a type parameter bracket}}
        .Naught:
     ()
   }
@@ -235,64 +235,16 @@ struct S {
   func nonProperty() {}
 }
 
-struct T {}
 
-var s: S
 
-switch s {
-case S():
-  ()
-case S(stat: _): // expected-error{{cannot match type property 'stat' of type 'S' in a 'case' pattern}}
-  ()
-case S(x: 0, y: 0, comp: 0):
-  ()
-case S(w: 0): // expected-error{{property 'w' not found in type 'S'}}
-  ()
-case S(nonProperty: 0): // expected-error{{member 'nonProperty' of type 'S' is not a property}}
-  ()
-case S(0): // expected-error{{subpattern of a struct or class pattern must have a keyword name}}
-  ()
-case S(x: 0, 0): // expected-error{{subpattern of a struct or class pattern must have a keyword name}}
-  ()
 
-case T(): // expected-error{{type 'T' of pattern does not match deduced type 'S'}}
-  ()
-}
-
-struct SG<A> { var x: A }
-
-var sgs: SG<S>
-
-switch sgs {
-case SG(x: S()):
-  ()
-case SG<S>(x: S()):
-  ()
-case SG<T>(x: T()): // expected-error{{type 'SG<T>' of pattern does not match deduced type 'SG<S>'}}
-  ()
-}
-
-func sg_generic<B : Equatable>(sgb: SG<B>, b: B) {
-  switch sgb {
-  case SG(x: b):
-    ()
-  }
-}
-
-typealias NonNominal = (foo: Int, bar: UnicodeScalar)
-var nn = NonNominal.self
-
-switch nn {
-case NonNominal(): // expected-error{{non-nominal type 'NonNominal' (aka '(foo: Int, bar: UnicodeScalar)') cannot be used with property pattern syntax}}
-  ()
-}
 
 // Tuple patterns.
 
 var t = (1, 2, 3)
 
-prefix operator +++ {}
-infix operator +++ {}
+prefix operator +++
+infix operator +++
 prefix func +++(x: (Int,Int,Int)) -> (Int,Int,Int) { return x }
 func +++(x: (Int,Int,Int), y: (Int,Int,Int)) -> (Int,Int,Int) {
   return (x.0+y.0, x.1+y.1, x.2+y.2)
@@ -309,9 +261,14 @@ case (1, 2, 3):
   ()
 
 // patterns in expression-only positions are errors.
-case +++(_, var d, 3): // expected-error{{invalid pattern}}
+case +++(_, var d, 3):
+// expected-error@-1{{'+++' is not a prefix unary operator}}
   ()
-case (_, var e, 3) +++ (1, 2, 3): // expected-error{{invalid pattern}}
+case (_, var e, 3) +++ (1, 2, 3):
+// expected-error@-1{{binary operator '+++' cannot be applied to operands of type '(_, <<error type>>, Int)' and '(Int, Int, Int)'}}
+// expected-note@-2{{expected an argument list of type '((Int, Int, Int), (Int, Int, Int))'}}
+// expected-error@-3{{'var' binding pattern cannot appear in an expression}}
+// expected-error@-4{{'var' binding pattern cannot appear in an expression}}
   ()
 }
 

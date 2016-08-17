@@ -29,6 +29,9 @@ def AutolinkExtractOption : OptionFlag;
 // The option should be accepted by swift -modulewrap
 def ModuleWrapOption : OptionFlag;
 
+// The option should be accepted by swift-format
+def SwiftFormatOption : OptionFlag;
+
 // The option should not be accepted by the driver.
 def NoDriverOption : OptionFlag;
 
@@ -99,7 +102,7 @@ def driver_mode : Joined<["--"], "driver-mode=">, Flags<[HelpHidden]>,
   HelpText<"Set the driver mode to either 'swift' or 'swiftc'">;
 
 def help : Flag<["-", "--"], "help">,
-  Flags<[FrontendOption, AutolinkExtractOption, ModuleWrapOption]>,
+  Flags<[FrontendOption, AutolinkExtractOption, ModuleWrapOption, SwiftFormatOption]>,
   HelpText<"Display available options">;
 def h : Flag<["-"], "h">, Alias<help>;
 def help_hidden : Flag<["-", "--"], "help-hidden">,
@@ -121,7 +124,7 @@ def _DASH_DASH : Option<["--"], "", KIND_REMAINING_ARGS>,
 
 def o : JoinedOrSeparate<["-"], "o">,
   Flags<[FrontendOption, AutolinkExtractOption, ModuleWrapOption,
-         NoInteractiveOption]>,
+         NoInteractiveOption, SwiftFormatOption]>,
   HelpText<"Write output to <file>">, MetaVarName<"<file>">;
 
 def j : JoinedOrSeparate<["-"], "j">, Flags<[DoesNotAffectIncrementalBuild]>,
@@ -131,7 +134,7 @@ def sdk : Separate<["-"], "sdk">, Flags<[FrontendOption]>,
   HelpText<"Compile against <sdk>">, MetaVarName<"<sdk>">;
 
 def D : JoinedOrSeparate<["-"], "D">, Flags<[FrontendOption]>,
-  HelpText<"Specifies one or more build configuration options">;
+  HelpText<"Marks a conditional compilation flag as true">;
 
 def F : JoinedOrSeparate<["-"], "F">, Flags<[FrontendOption]>,
   HelpText<"Add directory to framework search path">;
@@ -218,6 +221,10 @@ def solver_memory_threshold : Separate<["-"], "solver-memory-threshold">,
   Flags<[FrontendOption, HelpHidden, DoesNotAffectIncrementalBuild]>,
   HelpText<"Set the upper bound for memory consumption, in bytes, by the constraint solver">;   
 
+def disable_swift_bridge_attr : Flag<["-"], "disable-swift-bridge-attr">,
+  Flags<[FrontendOption, HelpHidden]>,
+  HelpText<"Disable using the swift bridge attribute">;
+
 // Diagnostic control options
 def suppress_warnings : Flag<["-"], "suppress-warnings">,
   Flags<[FrontendOption, DoesNotAffectIncrementalBuild]>,
@@ -254,6 +261,16 @@ def no_link_objc_runtime : Flag<["-"], "no-link-objc-runtime">,
   Flags<[HelpHidden, DoesNotAffectIncrementalBuild]>,
   HelpText<"Don't link in additions to the Objective-C runtime">;
 
+def static_stdlib: Flag<["-"], "static-stdlib">,
+  HelpText<"Statically link the Swift standard library">;
+def no_static_stdlib: Flag<["-"], "no-static-stdlib">,
+  Flags<[HelpHidden]>,
+  HelpText<"Don't statically link the Swift standard library">;
+
+def use_ld : Joined<["-"], "use-ld=">,
+  Flags<[DoesNotAffectIncrementalBuild]>,
+  HelpText<"Specifies the linker to be used">;
+
 def Xlinker : Separate<["-"], "Xlinker">,
   Flags<[DoesNotAffectIncrementalBuild]>,
   HelpText<"Specifies an option which should be passed to the linker">;
@@ -279,18 +296,47 @@ def Oplayground : Flag<["-"], "Oplayground">, Group<O_Group>,
 def g_Group : OptionGroup<"<debug info options>">;
 
 def g : Flag<["-"], "g">, Group<g_Group>, Flags<[FrontendOption]>,
-  HelpText<"Emit debug info">;
+  HelpText<"Emit debug info. "
+           "This is the preferred setting for debugging with LLDB.">;
 def gnone : Flag<["-"], "gnone">, Group<g_Group>, Flags<[FrontendOption]>,
   HelpText<"Don't emit debug info">;
 def gline_tables_only : Flag<["-"], "gline-tables-only">,
   Group<g_Group>, Flags<[FrontendOption]>,
   HelpText<"Emit minimal debug info for backtraces only">;
+def gdwarf_types : Flag<["-"], "gdwarf-types">,
+  Group<g_Group>, Flags<[FrontendOption]>,
+  HelpText<"Emit full DWARF type info.">;
 
 // Assert configuration identifiers.
 def AssertConfig : Separate<["-"], "assert-config">,
   Flags<[FrontendOption]>,
   HelpText<"Specify the assert_configuration replacement. "
-           "Possible values are Debug, Release, Replacement.">;
+           "Possible values are Debug, Release, Unchecked, DisableReplacement.">;
+
+// Code formatting options
+
+def code_formatting_Group : OptionGroup<"<code formatting options>">;
+
+def use_tabs : Flag<["-"], "use-tabs">, Group<code_formatting_Group>,
+  Flags<[SwiftFormatOption]>,
+  HelpText<"Use tabs for indentation.">;
+
+def in_place : Flag<["-"], "in-place">, Group<code_formatting_Group>,
+  Flags<[SwiftFormatOption]>,
+  HelpText<"Overwrite input file with formatted file.">;
+
+def tab_width : Separate<["-"], "tab-width">, Group<code_formatting_Group>,
+  Flags<[SwiftFormatOption]>,
+  HelpText<"Width of tab character.">, MetaVarName<"<n>">;
+
+def indent_width : Separate<["-"], "indent-width">, Group<code_formatting_Group>,
+  Flags<[SwiftFormatOption]>,
+  HelpText<"Number of characters to indent.">, MetaVarName<"<n>">;
+
+def line_range : Separate<["-"], "line-range">, Group<code_formatting_Group>,
+  Flags<[SwiftFormatOption]>,
+  HelpText<"<start line>:<end line>. Formats a range of lines (1-based). "
+           "Can only be used with one input file.">, MetaVarName<"<n:n>">;
 
 // File types
 
@@ -447,5 +493,15 @@ def embed_bitcode_marker : Flag<["-"], "embed-bitcode-marker">,
 def enable_testing : Flag<["-"], "enable-testing">,
   Flags<[FrontendOption, NoInteractiveOption, HelpHidden]>,
   HelpText<"Allows this module's internal API to be accessed for testing">;
+
+def sanitize_EQ : CommaJoined<["-"], "sanitize=">,
+  Flags<[FrontendOption, NoInteractiveOption]>, MetaVarName<"<check>">,
+  HelpText<"Turn on runtime checks for erroneous behavior.">;
+
+def sanitize_coverage_EQ : CommaJoined<["-"], "sanitize-coverage=">,
+  Flags<[FrontendOption, NoInteractiveOption]>,
+  MetaVarName<"<type>">,
+  HelpText<"Specify the type of coverage instrumentation for Sanitizers and"
+  " additional options separated by commas">;
 
 include "FrontendOptions.td"

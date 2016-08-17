@@ -89,6 +89,8 @@ __attribute__((availability(ios,introduced=8.0)))
 
 @class NSString, NSArray, NSDictionary, NSSet, NSEnumerator;
 
+@class NSMutableArray<ObjectType>;
+
 /// Aaa.  NSArray.  Bbb.
 @interface NSArray<ObjectType> : NSObject
 - (nonnull ObjectType)objectAtIndexedSubscript:(NSUInteger)idx;
@@ -97,6 +99,7 @@ __attribute__((availability(ios,introduced=8.0)))
 - (void)makeObjectsPerformSelector:(nonnull SEL)aSelector;
 - (void)makeObjectsPerformSelector:(nonnull SEL)aSelector withObject:(nullable ObjectType)anObject;
 - (void)makeObjectsPerformSelector:(nonnull SEL)aSelector withObject:(nullable ObjectType)anObject withObject:(nullable ObjectType)anotherObject;
+- (nonnull NSMutableArray<ObjectType> *)mutableCopy;
 @end
 
 @interface NSArray (AddingObject)
@@ -183,20 +186,20 @@ __attribute__((availability(ios,introduced=8.0)))
 typedef __INT32_TYPE__ int32_t;
 
 @interface NSNumber : NSValue
-+ (NSNumber *)numberWithInt:(int)value;
-+ (NSNumber *)numberWithInteger:(NSInteger)value;
-+ (NSNumber *)numberWithUnsignedInteger:(NSUInteger)value;
-+ (NSNumber *)numberWithDouble:(double)value;
++ (nonnull NSNumber *)numberWithInt:(int)value;
++ (nonnull NSNumber *)numberWithInteger:(NSInteger)value;
++ (nonnull NSNumber *)numberWithUnsignedInteger:(NSUInteger)value;
++ (nonnull NSNumber *)numberWithDouble:(double)value;
 
-- (NSNumber *)initWithInteger:(NSInteger)value;
-- (NSNumber *)initWithUnsignedInteger:(NSUInteger)value;
-- (NSNumber *)initWithDouble:(double)value;
-- (NSNumber *)addDouble:(double)value;
-- (NSNumber *)addBool:(BOOL)value;
+- (nonnull NSNumber *)initWithInteger:(NSInteger)value;
+- (nonnull NSNumber *)initWithUnsignedInteger:(NSUInteger)value;
+- (nonnull NSNumber *)initWithDouble:(double)value;
+- (nonnull NSNumber *)addDouble:(double)value;
+- (nonnull NSNumber *)addBool:(BOOL)value;
 
-- (NSNumber *)addUInt16:(unsigned short)value;
-- (NSNumber *)addInt:(int)value;
-- (NSNumber *)subtractInt32:(int32_t)value;
+- (nonnull NSNumber *)addUInt16:(unsigned short)value;
+- (nonnull NSNumber *)addInt:(int)value;
+- (nonnull NSNumber *)subtractInt32:(int32_t)value;
 
 @property NSInteger integerValue;
 @property NSUInteger unsignedIntegerValue;
@@ -264,7 +267,7 @@ BOOL BOOLtoBOOL(BOOL b);
 typedef CGPoint NSPoint;
 typedef CGSize NSSize;
 typedef CGRect NSRect;
-
+typedef NSPoint *NSPointArray;
 
 @interface BadCollection
 - (id)objectForKeyedSubscript:(id)key;
@@ -325,12 +328,12 @@ typedef NS_ENUM(NSInteger, NSPrefixWordBreak3) {
 };
 
 typedef NS_ENUM(NSInteger, NSPrefixWordBreakCustom) {
-  PrefixWordBreakProblemCase __attribute__((swift_name("ProblemCase"))),
+  PrefixWordBreakProblemCase __attribute__((swift_name("problemCase"))),
   NSPrefixWordBreakDeprecatedGoodCase __attribute__((deprecated)),
 };
 
 typedef NS_ENUM(NSInteger, NSPrefixWordBreak2Custom) {
-  PrefixWordBreak2ProblemCase __attribute__((swift_name("ProblemCase"))),
+  PrefixWordBreak2ProblemCase __attribute__((swift_name("problemCase"))),
   PrefixWordBreak2DeprecatedBadCase __attribute__((deprecated)),
   NSPrefixWordBreak2DeprecatedGoodCase __attribute__((deprecated)),
   NSPrefixWordBreak2GoodCase,
@@ -338,11 +341,11 @@ typedef NS_ENUM(NSInteger, NSPrefixWordBreak2Custom) {
 
 typedef NS_ENUM(NSInteger, NSPrefixWordBreakReversedCustom) {
   NSPrefixWordBreakReversedDeprecatedGoodCase __attribute__((deprecated)),
-  PrefixWordBreakReversedProblemCase __attribute__((swift_name("ProblemCase"))),
+  PrefixWordBreakReversedProblemCase __attribute__((swift_name("problemCase"))),
 };
 
 typedef NS_ENUM(NSInteger, NSPrefixWordBreakReorderedCustom) {
-  PrefixWordBreakReorderedProblemCase __attribute__((swift_name("ProblemCase"))),
+  PrefixWordBreakReorderedProblemCase __attribute__((swift_name("problemCase"))),
   NSPrefixWordBreakReorderedGoodCase,
   PrefixWordBreakReorderedDeprecatedBadCase __attribute__((deprecated)),
   NSPrefixWordBreakReorderedDeprecatedGoodCase __attribute__((deprecated)),
@@ -350,7 +353,7 @@ typedef NS_ENUM(NSInteger, NSPrefixWordBreakReorderedCustom) {
 
 typedef NS_ENUM(NSInteger, NSPrefixWordBreakReordered2Custom) {
   PrefixWordBreakReordered2DeprecatedBadCase __attribute__((deprecated)),
-  PrefixWordBreakReordered2ProblemCase __attribute__((swift_name("ProblemCase"))),
+  PrefixWordBreakReordered2ProblemCase __attribute__((swift_name("problemCase"))),
   NSPrefixWordBreakReordered2GoodCase,
   NSPrefixWordBreakReordered2DeprecatedGoodCase __attribute__((deprecated)),
 };
@@ -381,11 +384,20 @@ NS_ENUM(NSInteger, NSMalformedEnumMissingTypedef) {
   NSMalformedEnumMissingTypedefValue
 };
 
+@interface NSNumberFormatter : NSObject
+@end
+
 typedef NS_ENUM(NSUInteger, NSNumberFormatterBehavior) {
   NSNumberFormatterBehaviorDefault = 0,
   NSNumberFormatterBehavior10_0 = 1000,
   NSNumberFormatterBehavior10_4 = 1040,
 };
+
+@interface NSNotification : NSObject
+@end
+
+@interface NSNotificationQueue : NSObject
+@end
 
 typedef NS_ENUM(NSUInteger, NSPostingStyle) {
   NSPostWhenIdle = 1,
@@ -393,20 +405,23 @@ typedef NS_ENUM(NSUInteger, NSPostingStyle) {
   NSPostNow = 3
 };
 
+@interface NSXMLNode : NSObject
+@end
+
 typedef NS_ENUM(NSUInteger, NSXMLNodeKind) {
-	NSXMLInvalidKind = 0,
-	NSXMLDocumentKind,
-	NSXMLElementKind,
-	NSXMLAttributeKind,
-	NSXMLNamespaceKind,
-	NSXMLProcessingInstructionKind,
-	NSXMLCommentKind,
-	NSXMLTextKind,
-	NSXMLDTDKind __attribute__((swift_name("DTDKind"))),
-	NSXMLEntityDeclarationKind,
-	NSXMLAttributeDeclarationKind,
-	NSXMLElementDeclarationKind,
-	NSXMLNotationDeclarationKind
+  NSXMLInvalidKind = 0,
+  NSXMLDocumentKind,
+  NSXMLElementKind,
+  NSXMLAttributeKind,
+  NSXMLNamespaceKind,
+  NSXMLProcessingInstructionKind,
+  NSXMLCommentKind,
+  NSXMLTextKind,
+  NSXMLDTDKind __attribute__((swift_name("DTDKind"))),
+  NSXMLEntityDeclarationKind,
+  NSXMLAttributeDeclarationKind,
+  NSXMLElementDeclarationKind,
+  NSXMLNotationDeclarationKind
 };
 
 // From CoreFoundation
@@ -442,6 +457,7 @@ enum {
 
 /// Aaa.  NSRuncingOptions.  Bbb.
 typedef NS_OPTIONS(NSUInteger, NSRuncingOptions) {
+  NSRuncingNone = 0,
   NSRuncingEnableMince = 1,
   NSRuncingEnableQuince = 2,
 };
@@ -477,6 +493,9 @@ typedef NS_OPTIONS(NSUInteger, NSKeyValueObservingOptions) {
   NSKeyValueObservingOptionPrior /*NS_ENUM_AVAILABLE(10_5, 2_0)*/ = 0x08
 };
 
+@interface NSCalendar : NSObject
+@end
+
 #define NS_CALENDAR_ENUM_DEPRECATED(osx_in, osx_out, ios_in, ios_out, msg) \
   __attribute__((availability(macosx, introduced=osx_in, deprecated=osx_out, message=msg))) \
   __attribute__((availability(iphoneos, introduced=ios_in, deprecated=ios_out, message=msg)))
@@ -503,7 +522,7 @@ typedef NS_OPTIONS(NSUInteger, NSCalendarUnitDeprecated) {
 };
 
 typedef NS_OPTIONS(NSUInteger, NSOptionsAlsoGetSwiftName) {
-  ThisIsAnNSOptionsCaseWithSwiftName __attribute__((swift_name("Case")))
+  ThisIsAnNSOptionsCaseWithSwiftName __attribute__((swift_name("Case"))) = 0x1
 };
 
 #define CF_SWIFT_UNAVAILABLE(_msg) __attribute__((availability(swift, unavailable, message=_msg)))
@@ -552,16 +571,17 @@ typedef CF_OPTIONS(unsigned int, CMTimeFlagsWithNumber) {
 
 // Contrived name with a plural "-es"...normally these are "beeps".
 typedef NS_OPTIONS(NSInteger, AlertBuzzes) {
-  AlertBuzzFunk,
-  AlertBuzzHero,
-  AlertBuzzSosumi
+  AlertBuzzNone = 0,
+  AlertBuzzFunk = 1 << 0,
+  AlertBuzzHero = 1 << 1,
+  AlertBuzzSosumi = 1 << 2
 };
 
 // From AppKit
 typedef NS_OPTIONS(NSUInteger, NSBitmapFormat) {
   NSAlphaFirstBitmapFormat            = 1 << 0, // 0 means is alpha last (RGBA, CMYKA, etc.)
   NSAlphaNonpremultipliedBitmapFormat = 1 << 1, // 0 means is premultiplied
-  NSFloatingPointSamplesBitmapFormat  = 1 << 2,	// 0 is integer
+  NSFloatingPointSamplesBitmapFormat  = 1 << 2, // 0 is integer
 
   NS16BitLittleEndianBitmapFormat /*NS_ENUM_AVAILABLE_MAC(10_51)*/ = (1 << 8),
   NS32BitLittleEndianBitmapFormat /*NS_ENUM_AVAILABLE_MAC(10_51)*/ = (1 << 9),
@@ -577,29 +597,29 @@ typedef NS_OPTIONS(NSUInteger, NSBitmapFormatReversed) {
 
   NSAlphaFirstBitmapFormatR            = 1 << 0, // 0 means is alpha last (RGBA, CMYKA, etc.)
   NSAlphaNonpremultipliedBitmapFormatR = 1 << 1, // 0 means is premultiplied
-  NSFloatingPointSamplesBitmapFormatR  = 1 << 2,	// 0 is integer
+  NSFloatingPointSamplesBitmapFormatR  = 1 << 2, // 0 is integer
 };
 
 typedef NS_OPTIONS(NSUInteger, NSBitmapFormat2) {
-  NSU16a,
-  NSU32a,
+  NSU16a = 1,
+  NSU32a = 2,
 };
 
 typedef NS_OPTIONS(NSUInteger, NSBitmapFormat3) {
-  NSU16b,
-  NSU32b,
-  NSS16b,
-  NSS32b,
+  NSU16b = 1,
+  NSU32b = 2,
+  NSS16b = 4,
+  NSS32b = 8,
 };
 
 typedef NS_OPTIONS(NSUInteger, NSUBitmapFormat4) {
-  NSU16c,
-  NSU32c,
+  NSU16c = 1,
+  NSU32c = 2,
 };
 
 typedef NS_OPTIONS(NSUInteger, NSABitmapFormat5) {
-  NSAA16d,
-  NSAB32d,
+  NSAA16d = 1,
+  NSAB32d = 2,
 };
 
 /// Aaa.  NSPotentiallyUnavailableOptions.  Bbb.
@@ -758,6 +778,9 @@ extern void CGColorRelease(CGColorRef color) __attribute__((availability(macosx,
 @interface NSObject (NSDistributedObjects)
 @property (readonly) Class classForPortCoder NS_SWIFT_UNAVAILABLE("Use NSXPCConnection instead");
 @end
+
+typedef NSString *__nonnull NSNotificationName
+    __attribute((swift_newtype(struct)));
 
 NS_SWIFT_UNAVAILABLE("Use NSXPCConnection instead")
 extern NSString * const NSConnectionReplyMode;
@@ -993,6 +1016,12 @@ int variadicFunc2(int A, ...);
 extern NSString *NSGlobalConstant;
 extern void NSGlobalFunction(void);
 
+extern void NS123(void);
+extern void NSYELLING(void);
+extern void NS_SCREAMING(void);
+extern void NS_(void);
+extern NSString *NSHTTPRequestKey;
+
 @interface NSString (URLExtraction)
 @property (nonnull,copy,readonly) NSArray<NSURL *> *URLsInText;
 @end
@@ -1000,3 +1029,46 @@ extern void NSGlobalFunction(void);
 @interface NSObject (Selectors)
 -(void)messageSomeObject:(nonnull id)object selector:(SEL)selector;
 @end
+
+@interface NSOperation : NSObject
+@end
+
+@interface NSProgress : NSObject
+@end
+
+@protocol NSProgressReporting <NSObject>
+@property (readonly) NSProgress *progress;
+@end
+
+@interface NSIdLover: NSObject
+
+- (id _Nonnull)makesId;
+- (void)takesId:(id _Nonnull)x;
+- (void)takesArrayOfId:(const id _Nonnull * _Nonnull)x;
+- (void)takesNullableId:(id _Nullable)x;
+
+@property (strong) id propertyOfId;
+
+@end
+
+#define NSTimeIntervalSince1970 978307200.0
+#define NS_DO_SOMETHING 17
+
+typedef NS_ENUM(NSUInteger, NSClothingStyle) {
+  NSClothingStyleFormal = 0,
+  NSClothingStyleSemiFormal,
+  NSClothingStyleHipster,
+  NSClothingStyleHippie
+};
+static const NSClothingStyle NSClothingStyleOfficeCasual __attribute__((availability(swift,unavailable,replacement="NSClothingStyleSemiFormal"))) = NSClothingStyleSemiFormal;
+
+void acceptError(NSError * _Nonnull error);
+NSError * _Nonnull produceError(void);
+NSError * _Nullable produceOptionalError(void);
+
+extern NSString * const FictionalServerErrorDomain;
+
+typedef enum __attribute__((ns_error_domain(FictionalServerErrorDomain))) FictionalServerErrorCode : NSInteger {
+  FictionalServerErrorMeltedDown = 1
+} FictionalServerErrorCode;
+

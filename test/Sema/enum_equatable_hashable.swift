@@ -12,9 +12,10 @@ var aHash: Int = Foo.A.hashValue
 enum Generic<T> {
   case A, B
 
-  func method() -> Int {
+  static func method() -> Int {
+    // Test synthesis of == without any member lookup being done
     if A == B { }
-    return A.hashValue
+    return Generic.A.hashValue
   }
 }
 
@@ -95,7 +96,8 @@ private enum Bar<T> {
 
   mutating func value() -> T {
     switch self {
-    case E(let x): // expected-error{{invalid pattern}}
+    // FIXME: Should diagnose here that '.' needs to be inserted, but E has an ErrorType at this point
+    case E(let x):
       return x.value
     }
   }

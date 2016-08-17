@@ -11,13 +11,7 @@
 import StdlibUnittest
 import Foundation
 
-// Also import modules which are used by StdlibUnittest internally. This
-// workaround is needed to link all required libraries in case we compile
-// StdlibUnittest with -sil-serialize-all.
-import SwiftPrivate
-#if _runtime(_ObjC)
-import ObjectiveC
-#endif
+let testSuiteSuffix = _isDebugAssertConfiguration() ? "_debug" : "_release"
 
 struct NotBridgedKeyTy : Equatable, Hashable {
   init(_ value: Int) {
@@ -56,7 +50,7 @@ func == (lhs: BridgedVerbatimRefTy, rhs: BridgedVerbatimRefTy) -> Bool {
 assert(_isBridgedToObjectiveC(BridgedVerbatimRefTy.self))
 assert(_isBridgedVerbatimToObjectiveC(BridgedVerbatimRefTy.self))
 
-var SetTraps = TestSuite("SetTraps")
+var SetTraps = TestSuite("SetTraps" + testSuiteSuffix)
 
 SetTraps.test("sanity") {
   // Sanity checks.  This code should not trap.
@@ -69,7 +63,7 @@ class TestObjCKeyTy : NSObject {
     self.value = value
   }
 
-  override func isEqual(object: AnyObject!) -> Bool {
+  override func isEqual(_ object: Any?) -> Bool {
     if let other = object {
       if let otherObjcKey = other as? TestObjCKeyTy {
         return self.value == otherObjcKey.value
@@ -86,35 +80,34 @@ class TestObjCKeyTy : NSObject {
 }
 
 struct TestBridgedKeyTy : Hashable, _ObjectiveCBridgeable {
-  static func _isBridgedToObjectiveC() -> Bool {
-    return true
-  }
-
   init(_ value: Int) { self.value = value }
 
   var hashValue: Int { return value }
-
-  static func _getObjectiveCType() -> Any.Type {
-    return TestObjCKeyTy.self
-  }
 
   func _bridgeToObjectiveC() -> TestObjCKeyTy {
     return TestObjCKeyTy(value)
   }
 
   static func _forceBridgeFromObjectiveC(
-    x: TestObjCKeyTy,
-    inout result: TestBridgedKeyTy?
+    _ x: TestObjCKeyTy,
+    result: inout TestBridgedKeyTy?
   ) {
     result = TestBridgedKeyTy(x.value)
   }
 
   static func _conditionallyBridgeFromObjectiveC(
-    x: TestObjCKeyTy,
-    inout result: TestBridgedKeyTy?
+    _ x: TestObjCKeyTy,
+    result: inout TestBridgedKeyTy?
   ) -> Bool {
     result = TestBridgedKeyTy(x.value)
     return true
+  }
+
+  static func _unconditionallyBridgeFromObjectiveC(_ source: TestObjCKeyTy?)
+      -> TestBridgedKeyTy {
+    var result: TestBridgedKeyTy? = nil
+    _forceBridgeFromObjectiveC(source!, result: &result)
+    return result!
   }
 
   var value: Int
@@ -136,7 +129,7 @@ SetTraps.test("BridgedKeyIsNotNSCopyable1") {
 }
 
 SetTraps.test("Downcast1")
-  .skip(.Custom(
+  .skip(.custom(
     { _isFastAssertConfiguration() },
     reason: "this trap is not guaranteed to happen in -Ounchecked"))
   .code {
@@ -151,7 +144,7 @@ SetTraps.test("Downcast1")
 }
 
 SetTraps.test("Downcast2")
-  .skip(.Custom(
+  .skip(.custom(
     { _isFastAssertConfiguration() },
     reason: "this trap is not guaranteed to happen in -Ounchecked"))
   .code {

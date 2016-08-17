@@ -14,6 +14,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "swift/Basic/Lazy.h"
 #include "swift/Runtime/Config.h"
 #include "swift/Runtime/Debug.h"
 
@@ -25,6 +26,8 @@
 #include <unicode/ucol.h>
 #include <unicode/ucoleitr.h>
 #include <unicode/uiter.h>
+
+#include "../SwiftShims/UnicodeShims.h"
 
 /// Zero weight 0-8, 14-31, 127.
 const int8_t _swift_stdlib_unicode_ascii_collation_table_impl[128] = {
@@ -61,8 +64,7 @@ static const UCollator *MakeRootCollator() {
 // const here to make sure we don't misuse it.
 // http://sourceforge.net/p/icu/mailman/message/27427062/
 static const UCollator *GetRootCollator() {
-  static const UCollator *RootCollator = MakeRootCollator();
-  return RootCollator;
+  return SWIFT_LAZY_CONSTANT(MakeRootCollator());
 }
 
 /// This class caches the collation element results for the ASCII subset of
@@ -70,12 +72,11 @@ static const UCollator *GetRootCollator() {
 class ASCIICollation {
   int32_t CollationTable[128];
 public:
+  friend class swift::Lazy<ASCIICollation>;
 
+  static swift::Lazy<ASCIICollation> theTable;
   static const ASCIICollation *getTable() {
-    // We are reallying on C++11's guaranteed of thread safe static variable
-    // initialization.
-    static ASCIICollation collation;
-    return &collation;
+    return &theTable.get();
   }
 
   /// Maps an ASCII character to a collation element priority as would be
@@ -91,7 +92,11 @@ private:
     for (unsigned char c = 0; c < 128; ++c) {
       UErrorCode ErrorCode = U_ZERO_ERROR;
       intptr_t NumCollationElts = 0;
+#if defined(__CYGWIN__) || defined(_MSC_VER)
+      UChar Buffer[1];
+#else
       uint16_t Buffer[1];
+#endif
       Buffer[0] = c;
 
       UCollationElements *CollationIterator =
@@ -123,14 +128,23 @@ private:
 ///  <0 the left string is less than the right string.
 /// ==0 the strings are equal according to their collation.
 ///  >0 the left string is greater than the right string.
-extern "C"
-int32_t _swift_stdlib_unicode_compare_utf16_utf16(const uint16_t *LeftString,
-                                                  int32_t LeftLength,
-                                                  const uint16_t *RightString,
-                                                  int32_t RightLength) {
+int32_t
+swift::_swift_stdlib_unicode_compare_utf16_utf16(const uint16_t *LeftString,
+                                                 int32_t LeftLength,
+                                                 const uint16_t *RightString,
+                                                 int32_t RightLength) {
+#if defined(__CYGWIN__) || defined(_MSC_VER)
+  // ICU UChar type is platform dependent. In Cygwin, it is defined
+  // as wchar_t which size is 2. It seems that the underlying binary
+  // representation is same with swift utf16 representation.
+  return ucol_strcoll(GetRootCollator(),
+    reinterpret_cast<const UChar *>(LeftString), LeftLength,
+    reinterpret_cast<const UChar *>(RightString), RightLength);
+#else
   return ucol_strcoll(GetRootCollator(),
     LeftString, LeftLength,
     RightString, RightLength);
+#endif
 }
 
 /// Compares the strings via the Unicode Collation Algorithm on the root locale.
@@ -138,17 +152,22 @@ int32_t _swift_stdlib_unicode_compare_utf16_utf16(const uint16_t *LeftString,
 ///  <0 the left string is less than the right string.
 /// ==0 the strings are equal according to their collation.
 ///  >0 the left string is greater than the right string.
-extern "C"
-int32_t _swift_stdlib_unicode_compare_utf8_utf16(const char *LeftString,
-                                                 int32_t LeftLength,
-                                                 const uint16_t *RightString,
-                                                 int32_t RightLength) {
+int32_t
+swift::_swift_stdlib_unicode_compare_utf8_utf16(const unsigned char *LeftString,
+                                                int32_t LeftLength,
+                                                const uint16_t *RightString,
+                                                int32_t RightLength) {
   UCharIterator LeftIterator;
   UCharIterator RightIterator;
   UErrorCode ErrorCode = U_ZERO_ERROR;
 
-  uiter_setUTF8(&LeftIterator, LeftString, LeftLength);
+  uiter_setUTF8(&LeftIterator, reinterpret_cast<const char *>(LeftString), LeftLength);
+#if defined(__CYGWIN__) || defined(_MSC_VER)
+  uiter_setString(&RightIterator, reinterpret_cast<const UChar *>(RightString),
+                  RightLength);
+#else
   uiter_setString(&RightIterator, RightString, RightLength);
+#endif
 
   uint32_t Diff = ucol_strcollIter(GetRootCollator(),
     &LeftIterator, &RightIterator, &ErrorCode);
@@ -163,17 +182,17 @@ int32_t _swift_stdlib_unicode_compare_utf8_utf16(const char *LeftString,
 ///  <0 the left string is less than the right string.
 /// ==0 the strings are equal according to their collation.
 ///  >0 the left string is greater than the right string.
-extern "C"
-int32_t _swift_stdlib_unicode_compare_utf8_utf8(const char *LeftString,
-                                                int32_t LeftLength,
-                                                const char *RightString,
-                                                int32_t RightLength) {
+int32_t
+swift::_swift_stdlib_unicode_compare_utf8_utf8(const unsigned char *LeftString,
+                                               int32_t LeftLength,
+                                               const unsigned char *RightString,
+                                               int32_t RightLength) {
   UCharIterator LeftIterator;
   UCharIterator RightIterator;
   UErrorCode ErrorCode = U_ZERO_ERROR;
 
-  uiter_setUTF8(&LeftIterator, LeftString, LeftLength);
-  uiter_setUTF8(&RightIterator, RightString, RightLength);
+  uiter_setUTF8(&LeftIterator, reinterpret_cast<const char *>(LeftString), LeftLength);
+  uiter_setUTF8(&RightIterator, reinterpret_cast<const char *>(RightString), RightLength);
 
   uint32_t Diff = ucol_strcollIter(GetRootCollator(),
     &LeftIterator, &RightIterator, &ErrorCode);
@@ -200,8 +219,13 @@ int32_t _swift_stdlib_unicode_compare_utf8_utf8(const char *LeftString,
 static intptr_t hashChunk(const UCollator *Collator, intptr_t HashState,
                           const uint16_t *Str, uint32_t Length,
                           UErrorCode *ErrorCode) {
+#if defined(__CYGWIN__) || defined(_MSC_VER)
+  UCollationElements *CollationIterator = ucol_openElements(
+    Collator, reinterpret_cast<const UChar *>(Str), Length, ErrorCode);
+#else
   UCollationElements *CollationIterator = ucol_openElements(
     Collator, Str, Length, ErrorCode);
+#endif
   while (U_SUCCESS(*ErrorCode)) {
     intptr_t Elem = ucol_next(CollationIterator, ErrorCode);
     // Ignore zero valued collation elements. They don't participate in the
@@ -230,8 +254,8 @@ static intptr_t hashFinish(intptr_t HashState) {
   return HashState;
 }
 
-extern "C"
-intptr_t _swift_stdlib_unicode_hash(const uint16_t *Str, int32_t Length) {
+intptr_t
+swift::_swift_stdlib_unicode_hash(const uint16_t *Str, int32_t Length) {
   UErrorCode ErrorCode = U_ZERO_ERROR;
   intptr_t HashState = HASH_SEED;
   HashState = hashChunk(GetRootCollator(), HashState, Str, Length, &ErrorCode);
@@ -242,13 +266,13 @@ intptr_t _swift_stdlib_unicode_hash(const uint16_t *Str, int32_t Length) {
   return hashFinish(HashState);
 }
 
-extern "C" intptr_t _swift_stdlib_unicode_hash_ascii(const char *Str,
-                                                     int32_t Length) {
+intptr_t swift::_swift_stdlib_unicode_hash_ascii(const unsigned char *Str,
+                                                 int32_t Length) {
   const ASCIICollation *Table = ASCIICollation::getTable();
   intptr_t HashState = HASH_SEED;
   int32_t Pos = 0;
   while (Pos < Length) {
-    const char c = Str[Pos++];
+    const unsigned char c = Str[Pos++];
     assert((c & 0x80) == 0 && "This table only exists for the ASCII subset");
     intptr_t Elem = Table->map(c);
     // Ignore zero valued collation elements. They don't participate in the
@@ -269,15 +293,23 @@ extern "C" intptr_t _swift_stdlib_unicode_hash_ascii(const char *Str,
 /// required buffer length as a result. If this length does not match the
 /// 'DestinationCapacity' this function must be called again with a buffer of
 /// the required length to get an uppercase version of the string.
-extern "C"
-int32_t _swift_stdlib_unicode_strToUpper(uint16_t *Destination,
-                                         int32_t DestinationCapacity,
-                                         const uint16_t *Source,
-                                         int32_t SourceLength) {
+int32_t
+swift::_swift_stdlib_unicode_strToUpper(uint16_t *Destination,
+                                        int32_t DestinationCapacity,
+                                        const uint16_t *Source,
+                                        int32_t SourceLength) {
   UErrorCode ErrorCode = U_ZERO_ERROR;
+#if defined(__CYGWIN__) || defined(_MSC_VER)
+  uint32_t OutputLength = u_strToUpper(reinterpret_cast<UChar *>(Destination),
+                                       DestinationCapacity,
+                                       reinterpret_cast<const UChar *>(Source),
+                                       SourceLength,
+                                       "", &ErrorCode);
+#else
   uint32_t OutputLength = u_strToUpper(Destination, DestinationCapacity,
                                        Source, SourceLength,
                                        "", &ErrorCode);
+#endif
   if (U_FAILURE(ErrorCode) && ErrorCode != U_BUFFER_OVERFLOW_ERROR) {
     swift::crash("u_strToUpper: Unexpected error uppercasing unicode string.");
   }
@@ -288,17 +320,27 @@ int32_t _swift_stdlib_unicode_strToUpper(uint16_t *Destination,
 /// required buffer length as a result. If this length does not match the
 /// 'DestinationCapacity' this function must be called again with a buffer of
 /// the required length to get a lowercase version of the string.
-extern "C"
-int32_t _swift_stdlib_unicode_strToLower(uint16_t *Destination,
-                                         int32_t DestinationCapacity,
-                                         const uint16_t *Source,
-                                         int32_t SourceLength) {
+int32_t
+swift::_swift_stdlib_unicode_strToLower(uint16_t *Destination,
+                                        int32_t DestinationCapacity,
+                                        const uint16_t *Source,
+                                        int32_t SourceLength) {
   UErrorCode ErrorCode = U_ZERO_ERROR;
+#if defined(__CYGWIN__) || defined(_MSC_VER)
+  uint32_t OutputLength = u_strToLower(reinterpret_cast<UChar *>(Destination),
+                                       DestinationCapacity,
+                                       reinterpret_cast<const UChar *>(Source),
+                                       SourceLength,
+                                       "", &ErrorCode);
+#else
   uint32_t OutputLength = u_strToLower(Destination, DestinationCapacity,
                                        Source, SourceLength,
                                        "", &ErrorCode);
+#endif
   if (U_FAILURE(ErrorCode) && ErrorCode != U_BUFFER_OVERFLOW_ERROR) {
     swift::crash("u_strToLower: Unexpected error lowercasing unicode string.");
   }
   return OutputLength;
 }
+
+swift::Lazy<ASCIICollation> ASCIICollation::theTable;

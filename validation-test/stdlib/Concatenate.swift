@@ -13,21 +13,15 @@
 // REQUIRES: executable_test
 
 import StdlibUnittest
+import StdlibCollectionUnittest
 
-// Also import modules which are used by StdlibUnittest internally. This
-// workaround is needed to link all required libraries in case we compile
-// StdlibUnittest with -sil-serialize-all.
-import SwiftPrivate
-#if _runtime(_ObjC)
-import ObjectiveC
-#endif
 
 var ConcatenateTests = TestSuite("ConcatenateTests")
 
 // Help the type checker (<rdar://problem/17897413> Slow type deduction)
-typealias X = ContiguousArray<Range<Int>>
+typealias X = ContiguousArray<CountableRange<Int>>
 
-let samples: ContiguousArray<(Range<Int>, X)> = [
+let samples: ContiguousArray<(CountableRange<Int>, X)> = [
   (0..<8, [ 1..<1, 0..<5, 7..<7, 5..<7, 7..<8 ] as X),
   (0..<8, [ 0..<5, 7..<7, 5..<7, 7..<8 ] as X),
   (0..<8, [ 1..<1, 0..<5, 7..<7, 5..<7, 7..<8, 11..<11 ] as X),
@@ -37,25 +31,23 @@ let samples: ContiguousArray<(Range<Int>, X)> = [
   (0..<0, [] as X),
 ]
 
-let expected = ContiguousArray(0..<8)
-
 for (expected, source) in samples {
   ConcatenateTests.test("forward-\(source)") {
-    checkBidirectionalCollection(expected, source.flatten())
+    checkBidirectionalCollection(expected, source.joined())
   }
 
   ConcatenateTests.test("reverse-\(source)") {
     // FIXME: separate 'expected' and 'reversed' variables are a workaround
     // for: <rdar://problem/20789500>
-    let expected = ContiguousArray(expected.lazy.reverse())
-    let reversed = source.flatten().reverse()
+    let expected = ContiguousArray(expected.lazy.reversed())
+    let reversed = source.joined().reversed()
     checkBidirectionalCollection(expected, reversed)
   }
 
   ConcatenateTests.test("sequence-\(source)") {
     checkSequence(
       ContiguousArray(expected),
-      AnySequence(source).flatten())
+      AnySequence(source).joined())
   }
 }
 

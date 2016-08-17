@@ -24,7 +24,7 @@ namespace swift {
 
 /// Describes the kind of a requirement that occurs within a requirements
 /// clause.
-enum class RequirementKind : unsigned int {
+enum class RequirementKind : unsigned {
   /// A conformance requirement T : P, where T is a type that depends
   /// on a generic parameter and P is a protocol to which T must conform.
   Conformance,
@@ -55,7 +55,12 @@ class Requirement {
 public:
   /// Create a conformance or same-type requirement.
   Requirement(RequirementKind kind, Type first, Type second)
-    : FirstTypeAndKind(first, kind), SecondType(second) { }
+    : FirstTypeAndKind(first, kind), SecondType(second) {
+    if (kind != RequirementKind::WitnessMarker) {
+      assert(first);
+      assert(second);
+    }
+  }
 
   /// \brief Determine the kind of requirement.
   RequirementKind getKind() const { return FirstTypeAndKind.getInt(); }

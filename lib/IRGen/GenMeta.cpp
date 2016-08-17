@@ -10,10 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-//  This file implements IR generation for metadata constructs like
-//  metatypes and modules.  These is presently always trivial, but in
-//  the future we will likely have some sort of physical
-//  representation for at least some metatypes.
+//  This file implements IR generation for type metadata constructs.
 //
 //===----------------------------------------------------------------------===//
 
@@ -22,11 +19,13 @@
 #include "swift/AST/CanTypeVisitor.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/IRGenOptions.h"
+#include "swift/AST/Mangle.h"
 #include "swift/AST/Substitution.h"
 #include "swift/AST/Types.h"
 #include "swift/SIL/FormalLinkage.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/SIL/TypeLowering.h"
+#include "swift/Runtime/Metadata.h"
 #include "swift/ABI/MetadataValues.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -38,9 +37,11 @@
 #include "Address.h"
 #include "Callee.h"
 #include "ClassMetadataLayout.h"
+#include "ConstantBuilder.h"
 #include "FixedTypeInfo.h"
 #include "GenClass.h"
 #include "GenPoly.h"
+#include "GenValueWitness.h"
 #include "GenArchetype.h"
 #include "GenStruct.h"
 #include "HeapTypeInfo.h"
@@ -59,12 +60,48 @@ using namespace irgen;
 
 static llvm::Value *emitLoadOfObjCHeapMetadataRef(IRGenFunction &IGF,
                                                   llvm::Value *object);
-static llvm::LoadInst *
-emitLoadFromMetadataAtIndex(IRGenFunction &IGF,
-                            llvm::Value *metadata,
-                            int index,
-                            llvm::Type *objectTy,
-                            const llvm::Twine &suffix = "");
+
+static Address emitAddressOfMetadataSlotAtIndex(IRGenFunction &IGF,
+                                                llvm::Value *metadata,
+                                                int index,
+                                                llvm::Type *objectTy) {
+  // Require the metadata to be some type that we recognize as a
+  // metadata pointer.
+  assert(metadata->getType() == IGF.IGM.TypeMetadataPtrTy);
+
+  // We require objectType to be a pointer type so that the GEP will
+  // scale by the right amount.  We could load an arbitrary type using
+  // some extra bitcasting.
+  assert(IGF.IGM.DataLayout.getTypeStoreSize(objectTy) ==
+         IGF.IGM.DataLayout.getTypeStoreSize(IGF.IGM.SizeTy));
+
+  // Cast to T*.
+  auto objectPtrTy = objectTy->getPointerTo();
+  auto metadataWords = IGF.Builder.CreateBitCast(metadata, objectPtrTy);
+
+  auto indexV = llvm::ConstantInt::getSigned(IGF.IGM.SizeTy, index);
+
+  // GEP to the slot.
+  Address slot(IGF.Builder.CreateInBoundsGEP(metadataWords, indexV),
+               IGF.IGM.getPointerAlignment());
+
+  return slot;
+}
+
+/// Emit a load from the given metadata at a constant index.
+static llvm::LoadInst *emitLoadFromMetadataAtIndex(IRGenFunction &IGF,
+                                                   llvm::Value *metadata,
+                                                   int index,
+                                                   llvm::Type *objectTy,
+                                             const llvm::Twine &suffix = "") {
+  Address slot =
+    emitAddressOfMetadataSlotAtIndex(IGF, metadata, index, objectTy);
+
+  // Load.
+  return IGF.Builder.CreateLoad(slot, metadata->getName() + suffix);
+}
+
+static int getClassParentIndex(IRGenModule &IGM, ClassDecl *classDecl);
 
 /// Produce a constant to place in a metatype's isa field
 /// corresponding to the given metadata kind.
@@ -73,15 +110,11 @@ static llvm::ConstantInt *getMetadataKind(IRGenModule &IGM,
   return llvm::ConstantInt::get(IGM.MetadataKindTy, uint8_t(kind));
 }
 
-static Size::int_type getOffsetInWords(IRGenModule &IGM, Size offset) {
-  assert(offset.isMultipleOf(IGM.getPointerSize()));
-  return offset / IGM.getPointerSize();
-}
 static Address createPointerSizedGEP(IRGenFunction &IGF,
                                      Address base,
                                      Size offset) {
   return IGF.Builder.CreateConstArrayGEP(base,
-                                         getOffsetInWords(IGF.IGM, offset),
+                                         IGF.IGM.getOffsetInWords(offset),
                                          offset);
 }
 
@@ -105,7 +138,6 @@ llvm::Value *irgen::emitObjCMetadataRefForMetadata(IRGenFunction &IGF,
                                      classPtr);
   call->setDoesNotThrow();
   call->setDoesNotAccessMemory();
-  call->setCallingConv(IGF.IGM.RuntimeCC);
   return call;
 }
 
@@ -125,51 +157,70 @@ namespace {
   /// the fill operations that the compiler emits for the bound decl.
   ///
   /// FIXME: Rework to use GenericSignature instead of AllArchetypes
-  /// FIXME: Rework for nested generics
   struct GenericArguments {
     /// The values to use to initialize the arguments structure.
     SmallVector<llvm::Value *, 8> Values;
     SmallVector<llvm::Type *, 8> Types;
 
-    void collectTypes(IRGenModule &IGM, const NominalTypeDecl *nominal) {
-      auto generics = nominal->getGenericParamsOfContext();
-      collectTypes(IGM, generics->getForwardingSubstitutions(IGM.Context));
+    static unsigned getNumGenericArguments(IRGenModule &IGM,
+                                           NominalTypeDecl *nominal) {
+      GenericTypeRequirements requirements(IGM, nominal);
+      return unsigned(requirements.hasParentType())
+               + requirements.getNumTypeRequirements();
     }
 
-    void collectTypes(IRGenModule &IGM, ArrayRef<Substitution> subs) {
-      // Add all the argument archetypes.
-      Types.append(subs.size(), IGM.TypeMetadataPtrTy);
+    void collectTypes(IRGenModule &IGM, NominalTypeDecl *nominal) {
+      GenericTypeRequirements requirements(IGM, nominal);
+      collectTypes(IGM, requirements);
+    }
 
-      // Add protocol witness tables for all those archetypes.
-      for (auto sub : subs) {
-        auto conformances = sub.getConformances();
+    void collectTypes(IRGenModule &IGM,
+                      const GenericTypeRequirements &requirements) {
+      if (requirements.hasParentType()) {
+        Types.push_back(IGM.TypeMetadataPtrTy);
+      }
 
-        for (auto &conformance : conformances) {
-          auto *proto = conformance.getRequirement();
-          if (!Lowering::TypeConverter::protocolRequiresWitnessTable(proto))
-            continue;
-
+      for (auto &requirement : requirements.getRequirements()) {
+        if (requirement.Protocol) {
           Types.push_back(IGM.WitnessTablePtrTy);
+        } else {
+          Types.push_back(IGM.TypeMetadataPtrTy);
         }
       }
     }
 
-    void collect(IRGenFunction &IGF, BoundGenericType *type) {
-      auto subs = type->getSubstitutions(/*FIXME:*/nullptr, nullptr);
+    void collect(IRGenFunction &IGF, CanType type) {
+      NominalTypeDecl *decl;
+      CanType parentType;
 
-      // Add all the argument archetypes.
-      for (auto &sub : subs) {
-        CanType subbed = sub.getReplacement()->getCanonicalType();
-        Values.push_back(IGF.emitTypeMetadataRef(subbed));
+      if (auto nominalType = dyn_cast<NominalType>(type)) {
+        decl = nominalType->getDecl();
+        parentType = nominalType.getParent();
+      } else {
+        auto boundType = cast<BoundGenericType>(type);
+        decl = boundType->getDecl();
+        parentType = boundType.getParent();
       }
 
-      // Add protocol witness tables for all those archetypes.
-      for (auto i : indices(subs)) {
-        llvm::Value *metadata = Values[i];
-        emitWitnessTableRefs(IGF, subs[i], &metadata, Values);
+      GenericTypeRequirements requirements(IGF.IGM, decl);
+
+      if (requirements.hasParentType()) {
+        Values.push_back(IGF.emitTypeMetadataRef(parentType));
       }
 
-      collectTypes(IGF.IGM, subs);
+      auto subs =
+        type->gatherAllSubstitutions(IGF.IGM.getSwiftModule(), nullptr);
+      requirements.enumerateFulfillments(IGF.IGM, subs,
+                                [&](unsigned reqtIndex, CanType type,
+                                    Optional<ProtocolConformanceRef> conf) {
+        if (conf) {
+          Values.push_back(emitWitnessTableRef(IGF, type, *conf));
+        } else {
+          Values.push_back(IGF.emitTypeMetadataRef(type));
+        }
+      });
+
+      collectTypes(IGF.IGM, decl);
       assert(Types.size() == Values.size());
     }
   };
@@ -178,55 +229,92 @@ namespace {
 /// Given an array of polymorphic arguments as might be set up by
 /// GenericArguments, bind the polymorphic parameters.
 static void emitPolymorphicParametersFromArray(IRGenFunction &IGF,
-                                               const GenericParamList &generics,
+                                               NominalTypeDecl *typeDecl,
                                                Address array) {
-  unsigned nextIndex = 0;
-  auto claimNext = [&](llvm::PointerType *desiredType) {
-    Address addr = array;
-    if (unsigned index = nextIndex++) {
-      addr = IGF.Builder.CreateConstArrayGEP(array, index,
-                                             index * IGF.IGM.getPointerSize());
-    }
-    llvm::Value *value = IGF.Builder.CreateLoad(addr);
-    return IGF.Builder.CreateBitCast(value, desiredType);
+  GenericTypeRequirements requirements(IGF.IGM, typeDecl);
+
+  array = IGF.Builder.CreateElementBitCast(array, IGF.IGM.TypeMetadataPtrTy);
+
+  auto getInContext = [&](CanType type) -> CanType {
+    return ArchetypeBuilder::mapTypeIntoContext(typeDecl, type, nullptr)
+             ->getCanonicalType();
   };
 
-  // Bind all the argument archetypes.
-  for (auto archetype : generics.getAllArchetypes()) {
-    llvm::Value *metadata = claimNext(IGF.IGM.TypeMetadataPtrTy);
-    metadata->setName(archetype->getFullName());
-    IGF.setUnscopedLocalTypeData(CanType(archetype),
-                                 LocalTypeDataKind::forTypeMetadata(),
-                                 metadata);
+  // If we have a parent type, it's the first parameter.
+  if (requirements.hasParentType()) {
+    auto parentType = getInContext(requirements.getParentType());
+    llvm::Value *parentMetadata = IGF.Builder.CreateLoad(array);
+    array = IGF.Builder.CreateConstArrayGEP(array, 1, IGF.IGM.getPointerSize());
+    IGF.bindLocalTypeDataFromTypeMetadata(parentType, IsExact, parentMetadata);
   }
 
-  // Bind all the argument witness tables.
-  for (auto archetype : generics.getAllArchetypes()) {
-    for (auto protocol : archetype->getConformsTo()) {
-      if (!Lowering::TypeConverter::protocolRequiresWitnessTable(protocol))
-        continue;
-      llvm::Value *wtable = claimNext(IGF.IGM.WitnessTablePtrTy);
-      auto key = LocalTypeDataKind::forAbstractProtocolWitnessTable(protocol);
-      IGF.setUnscopedLocalTypeData(CanType(archetype), key, wtable);
+  // Okay, bind everything else from the context.
+  requirements.bindFromBuffer(IGF, array, getInContext);
+}
+
+static bool isTypeErasedGenericClass(NominalTypeDecl *ntd) {
+  // ObjC classes are type erased.
+  // TODO: Unless they have magic methods...
+  if (auto clas = dyn_cast<ClassDecl>(ntd))
+    return clas->hasClangNode() && clas->isGenericContext();
+  return false;
+}
+
+static bool isTypeErasedGenericClassType(CanType type) {
+  if (auto nom = type->getAnyNominal())
+    return isTypeErasedGenericClass(nom);
+  return false;
+}
+
+// Get the type that exists at runtime to represent a compile-time type.
+CanType
+irgen::getRuntimeReifiedType(IRGenModule &IGM, CanType type) {
+  return CanType(type.transform([&](Type t) -> Type {
+    if (isTypeErasedGenericClassType(CanType(t))) {
+      return t->getAnyNominal()->getDeclaredType()->getCanonicalType();
     }
-  }
+    return t;
+  }));
 }
 
 /// Attempts to return a constant heap metadata reference for a
-/// nominal type.
-llvm::Constant *irgen::tryEmitConstantTypeMetadataRef(IRGenModule &IGM,
-                                                      CanType type) {
-  auto theDecl = type->getAnyNominal();
-  assert(theDecl && "emitting constant metadata ref for non-nominal type?");
+/// class type.  This is generally only valid for specific kinds of
+/// ObjC reference, like superclasses or category references.
+llvm::Constant *irgen::tryEmitConstantHeapMetadataRef(IRGenModule &IGM,
+                                                      CanType type,
+                                              bool allowDynamicUninitialized) {
+  auto theDecl = type->getClassOrBoundGenericClass();
+  assert(theDecl && "emitting constant heap metadata ref for non-class type?");
 
-  if (IGM.hasMetadataPattern(theDecl))
+  // If the class must not require dynamic initialization --- e.g. if it
+  // is a super reference --- then respect everything that might impose that.
+  if (!allowDynamicUninitialized) {
+    if (doesClassMetadataRequireDynamicInitialization(IGM, theDecl))
+      return nullptr;
+
+  // Otherwise, just respect genericity.
+  } else if (theDecl->isGenericContext() && !isTypeErasedGenericClass(theDecl)){
     return nullptr;
+  }
 
-  if (auto theClass = type->getClassOrBoundGenericClass())
-    if (!hasKnownSwiftMetadata(IGM, theClass))
-      return IGM.getAddrOfObjCClass(theClass, NotForDefinition);
+  // For imported classes, use the ObjC class symbol.
+  // This incidentally cannot coincide with most of the awkward cases, like
+  // having parent metadata.
+  if (!hasKnownSwiftMetadata(IGM, theDecl))
+    return IGM.getAddrOfObjCClass(theDecl, NotForDefinition);
 
   return IGM.getAddrOfTypeMetadata(type, false);
+}
+
+/// Attempts to return a constant type metadata reference for a
+/// nominal type.
+ConstantReference
+irgen::tryEmitConstantTypeMetadataRef(IRGenModule &IGM, CanType type,
+                                      SymbolReferenceKind refKind) {
+  if (!isTypeMetadataAccessTrivial(IGM, type))
+    return ConstantReference();
+
+  return IGM.getAddrOfTypeMetadata(type, false, refKind);
 }
 
 /// Emit a reference to an ObjC class.  In general, the only things
@@ -239,7 +327,19 @@ llvm::Constant *irgen::tryEmitConstantTypeMetadataRef(IRGenModule &IGM,
 llvm::Value *irgen::emitObjCHeapMetadataRef(IRGenFunction &IGF,
                                             ClassDecl *theClass,
                                             bool allowUninitialized) {
-  auto classObject = IGF.IGM.getAddrOfObjCClass(theClass, NotForDefinition);
+  // If the class is visible only through the Objective-C runtime, form the
+  // appropriate runtime call.
+  if (theClass->getForeignClassKind() == ClassDecl::ForeignKind::RuntimeOnly) {
+    SmallString<64> scratch;
+    auto className =
+        IGF.IGM.getAddrOfGlobalString(theClass->getObjCRuntimeName(scratch));
+    return IGF.Builder.CreateCall(IGF.IGM.getLookUpClassFn(), className);
+  }
+
+  assert(!theClass->isForeign());
+
+  Address classRef = IGF.IGM.getAddrOfObjCClassRef(theClass);
+  auto classObject = IGF.Builder.CreateLoad(classRef);
   if (allowUninitialized) return classObject;
 
   // TODO: memoize this the same way that we memoize Swift type metadata?
@@ -284,8 +384,8 @@ static llvm::Value *emitNominalMetadataRef(IRGenFunction &IGF,
   }
 
   // We are applying generic parameters to a generic type.
-  auto boundGeneric = cast<BoundGenericType>(theType);
-  assert(boundGeneric->getDecl() == theDecl);
+  assert(theType->isSpecialized() &&
+         theType->getAnyNominal() == theDecl);
 
   // Check to see if we've maybe got a local reference already.
   if (auto cache = IGF.tryGetLocalTypeData(theType,
@@ -294,7 +394,7 @@ static llvm::Value *emitNominalMetadataRef(IRGenFunction &IGF,
 
   // Grab the substitutions.
   GenericArguments genericArgs;
-  genericArgs.collect(IGF, boundGeneric);
+  genericArgs.collect(IGF, theType);
   assert(genericArgs.Values.size() > 0 && "no generic args?!");
 
   // Call the generic metadata accessor function.
@@ -358,17 +458,20 @@ bool irgen::hasKnownVTableEntry(IRGenModule &IGM,
 /// need a cache variable in its accessor.
 bool irgen::isTypeMetadataAccessTrivial(IRGenModule &IGM, CanType type) {
   assert(!type->hasArchetype());
-  assert(!type->hasUnboundGenericType());
 
   // Value type metadata only requires dynamic initialization on first
   // access if it contains a resilient type.
   if (isa<StructType>(type) || isa<EnumType>(type)) {
-    assert(!type->getAnyNominal()->isGenericContext() &&
-           "shouldn't be called for a generic type");
+    auto nominalType = cast<NominalType>(type);
 
     // Imported type metadata always requires an accessor.
-    if (type->getAnyNominal()->hasClangNode())
+    if (nominalType->getDecl()->hasClangNode())
       return false;
+
+    // Metadata with a non-trivial parent node always requires an accessor.
+    if (auto parent = nominalType.getParent())
+      if (!isTypeMetadataAccessTrivial(IGM, parent))
+        return false;
 
     // Resiliently-sized metadata access always requires an accessor.
     return (IGM.getTypeInfoForLowered(type).isFixedSize());
@@ -395,6 +498,27 @@ bool irgen::isTypeMetadataAccessTrivial(IRGenModule &IGM, CanType type) {
   return false;
 }
 
+static bool hasRequiredTypeMetadataAccessFunction(IRGenModule &IGM,
+                                                  NominalTypeDecl *typeDecl) {
+  // This needs to be kept in sync with getTypeMetadataStrategy.
+
+  if (isa<ProtocolDecl>(typeDecl))
+    return false;
+
+  switch (getDeclLinkage(typeDecl)) {
+  case FormalLinkage::PublicUnique:
+  case FormalLinkage::HiddenUnique:
+  case FormalLinkage::Private:
+    return true;
+
+  case FormalLinkage::PublicNonUnique:
+  case FormalLinkage::HiddenNonUnique:
+    return false;
+  }
+  llvm_unreachable("bad formal linkage");
+
+}
+
 /// Return the standard access strategy for getting a non-dependent
 /// type metadata object.
 MetadataAccessStrategy
@@ -408,14 +532,16 @@ irgen::getTypeMetadataAccessStrategy(IRGenModule &IGM, CanType type) {
   // Note that while protocol types don't have a metadata pattern,
   // we still require an accessor since we actually want to get
   // the metadata for the existential type.
+  //
+  // This needs to kept in sync with hasRequiredTypeMetadataAccessPattern.
   auto nominal = type->getAnyNominal();
   if (nominal && !isa<ProtocolDecl>(nominal)) {
     // Metadata accessors for fully-substituted generic types are
     // emitted with shared linkage.
-    if (nominal->isGenericContext()) {
-      if (isa<BoundGenericType>(type))
+    if (nominal->isGenericContext() && !nominal->isObjC()) {
+      if (type->isSpecialized())
         return MetadataAccessStrategy::NonUniqueAccessor;
-      assert(isa<UnboundGenericType>(type));
+      assert(type->hasUnboundGenericType());
     }
 
     // If the type doesn't guarantee that it has an access function,
@@ -576,7 +702,6 @@ namespace {
         auto call = IGF.Builder.CreateCall(IGF.IGM.getGetTupleMetadata2Fn(),
                                            args);
         call->setDoesNotThrow();
-        call->setCallingConv(IGF.IGM.RuntimeCC);
         return setLocal(CanType(type), call);
       }
 
@@ -595,7 +720,6 @@ namespace {
         auto call = IGF.Builder.CreateCall(IGF.IGM.getGetTupleMetadata3Fn(),
                                            args);
         call->setDoesNotThrow();
-        call->setCallingConv(IGF.IGM.RuntimeCC);
         return setLocal(CanType(type), call);
       }
       default:
@@ -634,7 +758,6 @@ namespace {
         auto call = IGF.Builder.CreateCall(IGF.IGM.getGetTupleMetadataFn(),
                                            args);
         call->setDoesNotThrow();
-        call->setCallingConv(IGF.IGM.RuntimeCC);
 
         IGF.Builder.CreateLifetimeEnd(buffer,
                                     IGF.IGM.getPointerSize() * elements.size());
@@ -728,7 +851,6 @@ namespace {
                                             IGF.IGM.getGetFunctionMetadata1Fn(),
                                             {flags, arg0, resultMetadata});
           call->setDoesNotThrow();
-          call->setCallingConv(IGF.IGM.RuntimeCC);
           return setLocal(CanType(type), call);
         }
 
@@ -739,7 +861,6 @@ namespace {
                                             IGF.IGM.getGetFunctionMetadata2Fn(),
                                             {flags, arg0, arg1, resultMetadata});
           call->setDoesNotThrow();
-          call->setCallingConv(IGF.IGM.RuntimeCC);
           return setLocal(CanType(type), call);
         }
 
@@ -752,7 +873,6 @@ namespace {
                                             {flags, arg0, arg1, arg2,
                                              resultMetadata});
           call->setDoesNotThrow();
-          call->setCallingConv(IGF.IGM.RuntimeCC);
           return setLocal(CanType(type), call);
         }
 
@@ -789,7 +909,6 @@ namespace {
           auto call = IGF.Builder.CreateCall(IGF.IGM.getGetFunctionMetadataFn(),
                                              pointerToFirstArg.getAddress());
           call->setDoesNotThrow();
-          call->setCallingConv(IGF.IGM.RuntimeCC);
           
           IGF.Builder.CreateLifetimeEnd(buffer,
                                    IGF.IGM.getPointerSize() * arguments.size());
@@ -816,7 +935,6 @@ namespace {
                   : IGF.IGM.getGetExistentialMetatypeMetadataFn();
       auto call = IGF.Builder.CreateCall(fn, instMetadata);
       call->setDoesNotThrow();
-      call->setCallingConv(IGF.IGM.RuntimeCC);
 
       return setLocal(type, call);
     }
@@ -859,7 +977,6 @@ namespace {
                                          {IGF.IGM.getSize(Size(protocols.size())),
                                           descriptorArray.getAddress()});
       call->setDoesNotThrow();
-      call->setCallingConv(IGF.IGM.RuntimeCC);
       IGF.Builder.CreateLifetimeEnd(descriptorArray,
                                    IGF.IGM.getPointerSize() * protocols.size());
       return setLocal(type, call);
@@ -883,7 +1000,7 @@ namespace {
     }
 
     llvm::Value *visitArchetypeType(CanArchetypeType type) {
-      return IGF.getLocalTypeData(type, LocalTypeDataKind::forTypeMetadata());
+      return emitArchetypeTypeMetadataRef(IGF, type);
     }
 
     llvm::Value *visitGenericTypeParamType(CanGenericTypeParamType type) {
@@ -917,7 +1034,7 @@ namespace {
 
     /// Set the metatype in local data.
     llvm::Value *setLocal(CanType type, llvm::Instruction *metatype) {
-      IGF.setScopedLocalTypeData(type,  LocalTypeDataKind::forTypeMetadata(),
+      IGF.setScopedLocalTypeData(type, LocalTypeDataKind::forTypeMetadata(),
                                  metatype);
       return metatype;
     }
@@ -941,6 +1058,13 @@ static Address emitAddressOfSuperclassRefInClassMetadata(IRGenFunction &IGF,
   return IGF.Builder.CreateConstArrayGEP(addr, index, IGF.IGM.getPointerSize());
 }
 
+static bool isLoadFrom(llvm::Value *value, Address address) {
+  if (auto load = dyn_cast<llvm::LoadInst>(value)) {
+    return load->getOperand(0) == address.getAddress();
+  }
+  return false;
+}
+
 /// Emit the body of a lazy cache accessor.
 ///
 /// If cacheVariable is null, we perform the direct access every time.
@@ -957,9 +1081,6 @@ void irgen::emitLazyCacheAccessFunction(IRGenModule &IGM,
   accessor->setDoesNotAccessMemory();
 
   IRGenFunction IGF(IGM, accessor);
-  if (IGM.DebugInfo)
-    IGM.DebugInfo->emitArtificialFunction(IGF, IGF.CurFn);
-
   if (IGM.DebugInfo)
     IGM.DebugInfo->emitArtificialFunction(IGF, accessor);
 
@@ -999,6 +1120,10 @@ void irgen::emitLazyCacheAccessFunction(IRGenModule &IGM,
   // FIXME: Technically should be "consume", but that introduces barriers in the
   // current LLVM ARM backend.
   auto load = IGF.Builder.CreateLoad(cache);
+  // Make this barrier explicit when building for TSan to avoid false positives.
+  if (IGM.IRGen.Opts.Sanitize == SanitizerKind::Thread)
+    load->setOrdering(llvm::AtomicOrdering::Acquire);
+
 
   // Compare the load result against null.
   auto isNullBB = IGF.createBasicBlock("cacheIsNull");
@@ -1011,10 +1136,19 @@ void irgen::emitLazyCacheAccessFunction(IRGenModule &IGM,
   IGF.Builder.emitBlock(isNullBB);
   llvm::Value *directResult = getValue(IGF);
 
-  // Store it back to the cache variable.  The direct metadata lookup is
-  // required to have already dependency-ordered any initialization
-  // it triggered before loads from the pointer it returned.
-  IGF.Builder.CreateStore(directResult, cache);
+  // Store it back to the cache variable.  This needs to be a store-release
+  // because it needs to propagate memory visibility to the other threads
+  // that can access the cache: the initializing stores might be visible
+  // to this thread, but they aren't transitively guaranteed to be visible
+  // to other threads unless this is a store-release.
+  //
+  // However, we can skip this if the value was actually loaded from the
+  // cache.  This is a simple, if hacky, peephole that's useful for the
+  // code in emitInPlaceTypeMetadataAccessFunctionBody.
+  if (!isLoadFrom(directResult, cache)) {
+    IGF.Builder.CreateStore(directResult, cache)
+      ->setAtomic(llvm::Release);
+  }
 
   IGF.Builder.CreateBr(contBB);
   auto storeBB = IGF.Builder.GetInsertBlock();
@@ -1030,7 +1164,7 @@ void irgen::emitLazyCacheAccessFunction(IRGenModule &IGM,
 
 static llvm::Value *emitGenericMetadataAccessFunction(IRGenFunction &IGF,
                                                       NominalTypeDecl *nominal,
-                                                      GenericArguments genericArgs) {
+                                                      GenericArguments &genericArgs) {
   CanType declaredType = nominal->getDeclaredType()->getCanonicalType();
   llvm::Value *metadata = IGF.IGM.getAddrOfTypeMetadata(declaredType, true);
 
@@ -1073,81 +1207,176 @@ static llvm::Value *emitGenericMetadataAccessFunction(IRGenFunction &IGF,
 
 }
 
+using InPlaceMetadataInitializer =
+  llvm::function_ref<llvm::Value*(IRGenFunction &IGF, llvm::Value *metadata)>;
+
+/// Emit a helper function for swift_once that performs in-place
+/// initialization of the given nominal type.
+static llvm::Constant *
+createInPlaceMetadataInitializationFunction(IRGenModule &IGM, 
+                                            CanNominalType type,
+                                            llvm::Constant *metadata,
+                                            llvm::Constant *cacheVariable,
+                                     InPlaceMetadataInitializer &&initialize) {
+  // There's an ignored i8* parameter.
+  auto fnTy = llvm::FunctionType::get(IGM.VoidTy, {IGM.Int8PtrTy},
+                                      /*variadic*/ false);
+  llvm::Function *fn = llvm::Function::Create(fnTy,
+                                       llvm::GlobalValue::PrivateLinkage,
+                                       Twine("initialize_metadata_")
+                                           + type->getDecl()->getName().str(),
+                                       &IGM.Module);
+  fn->setAttributes(IGM.constructInitialAttributes());
+  
+  // Set up the function.
+  IRGenFunction IGF(IGM, fn);
+  if (IGM.DebugInfo)
+    IGM.DebugInfo->emitArtificialFunction(IGF, fn);
+
+  // Skip instrumentation when building for TSan to avoid false positives.
+  // The synchronization for this happens in the Runtime and we do not see it.
+  if (IGM.IRGen.Opts.Sanitize == SanitizerKind::Thread)
+    fn->removeFnAttr(llvm::Attribute::SanitizeThread);
+
+  // Emit the initialization.
+  llvm::Value *relocatedMetadata = initialize(IGF, metadata);
+
+  // Store back to the cache variable.
+  IGF.Builder.CreateStore(relocatedMetadata,
+                          Address(cacheVariable, IGM.getPointerAlignment()))
+    ->setAtomic(llvm::Release);
+
+  IGF.Builder.CreateRetVoid();
+  return fn;
+}
+
+/// Emit the function body for the type metadata accessor of a nominal type
+/// that might require in-place initialization.
+static llvm::Value *
+emitInPlaceTypeMetadataAccessFunctionBody(IRGenFunction &IGF,
+                                          CanNominalType type,
+                                          llvm::Constant *cacheVariable,
+                                    InPlaceMetadataInitializer &&initializer) {
+  llvm::Constant *metadata = IGF.IGM.getAddrOfTypeMetadata(type, false);
+
+  // We might not have interesting initialization to do.
+  assert((cacheVariable == nullptr) ==
+            isTypeMetadataAccessTrivial(IGF.IGM, type));
+  if (!cacheVariable)
+    return metadata;
+
+  // Okay, we have non-trivial initialization to do.
+  // Ensure that we don't have multiple threads racing to do this.
+  llvm::GlobalVariable *onceGuard =
+    new llvm::GlobalVariable(IGF.IGM.Module, IGF.IGM.OnceTy, /*constant*/ false,
+                             llvm::GlobalValue::PrivateLinkage,
+                             llvm::Constant::getNullValue(IGF.IGM.OnceTy),
+                             Twine(IGF.CurFn->getName()) + ".once_token");
+
+  // There's no point in performing the fast-path token check here
+  // because we've already checked the cache variable.  We're just using
+  // swift_once to guarantee thread safety.
+  assert(cacheVariable && "lazy initialization but no cache variable");
+
+  // Create the protected function.  swift_once wants this as an i8*.
+  llvm::Value *onceFn =
+    createInPlaceMetadataInitializationFunction(IGF.IGM, type, metadata,
+                                                cacheVariable,
+                                                std::move(initializer));
+  onceFn = IGF.Builder.CreateBitCast(onceFn, IGF.IGM.Int8PtrTy);
+
+  auto onceCall = IGF.Builder.CreateCall(IGF.IGM.getOnceFn(),
+                                         {onceGuard, onceFn});
+  onceCall->setCallingConv(IGF.IGM.DefaultCC);
+
+  // We can just load the cache now.
+  // TODO: this should be consume-ordered when LLVM supports it.
+  Address cacheAddr = Address(cacheVariable, IGF.IGM.getPointerAlignment());
+  llvm::LoadInst *relocatedMetadata = IGF.Builder.CreateLoad(cacheAddr);
+  // Make this barrier explicit when building for TSan to avoid false positives.
+  if (IGF.IGM.IRGen.Opts.Sanitize == SanitizerKind::Thread)
+    relocatedMetadata->setOrdering(llvm::AtomicOrdering::Acquire);
+
+  // emitLazyCacheAccessFunction will see that the value was loaded from
+  // the guard variable and skip the redundant store back.
+  return relocatedMetadata;
+}
+
 /// Emit the body of a metadata accessor function for the given type.
-static llvm::Value *emitMetadataAccessFunction(IRGenFunction &IGF,
-                                               CanType type) {
-  if (auto nominal = type->getAnyNominal()) {
-    if (nominal->isGenericContext()) {
-      // This is a metadata accessor for a fully substituted generic type.
-      assert(!type->hasArchetype() &&
-             "partially substituted types do not have accessors");
-      return emitDirectTypeMetadataRef(IGF, type);
-    }
+///
+/// This function is appropriate for ordinary situations where the
+/// construction of the metadata value just involves calling idempotent
+/// metadata-construction functions.  It is not used for the in-place
+/// initialization of non-generic nominal type metadata.
+static llvm::Value *emitTypeMetadataAccessFunctionBody(IRGenFunction &IGF,
+                                                       CanType type) {
+  assert(!type->hasArchetype() &&
+         "cannot emit metadata accessor for context-dependent type");
 
-    // We should not be emitting metadata accessors for types unless
-    // we have full knowledge of their layout.
-    assert(!IGF.IGM.isResilient(nominal, ResilienceExpansion::Maximal));
+  // We only take this path for That means
+  // everything except non-generic nominal types.
+  auto typeDecl = type->getAnyNominal();
+  if (!typeDecl)
+    return emitDirectTypeMetadataRef(IGF, type);
 
-    // We will still have a metadata pattern if the type is not generic,
-    // but contains resiliently-sized fields.
-    bool isPattern = IGF.IGM.hasMetadataPattern(nominal);
+  if (typeDecl->isGenericContext() &&
+      !(isa<ClassDecl>(typeDecl) && typeDecl->hasClangNode())) {
+    // This is a metadata accessor for a fully substituted generic type.
+    return emitDirectTypeMetadataRef(IGF, type);
+  }
 
-    // Non-native Swift classes need to be handled differently.
-    if (auto classDecl = dyn_cast<ClassDecl>(nominal)) {
-      // We emit a completely different pattern for foreign classes.
-      if (classDecl->isForeign()) {
-        return emitForeignTypeMetadataRef(IGF, type);
-      }
+  // We should never be emitting a metadata accessor for resilient nominal
+  // types outside of their defining module.  We'd only do that anyway for
+  // types that don't guarantee the existence of a non-unique access
+  // function, and that should never be true of a resilient type with
+  // external availability.
+  //
+  // (The type might still not have a statically-known layout.  It just
+  // can't be resilient at the top level: we have to know its immediate
+  // members, or we can't even begin to approach the problem of emitting
+  // metadata for it.)
+  assert(!IGF.IGM.isResilient(typeDecl, ResilienceExpansion::Maximal));
 
-      // Classes that might not have Swift metadata use a different
-      // symbol name.
-      if (!hasKnownSwiftMetadata(IGF.IGM, classDecl)) {
-        assert(!classDecl->isGenericContext() &&
-               "ObjC class cannot be generic");
-        return emitObjCMetadataRef(IGF, classDecl);
-      }
-
-      // If this is a class with constant metadata, we still need to
-      // force ObjC initialization if we're doing Objective-C interop.
-      if (IGF.IGM.ObjCInterop && !isPattern) {
-        llvm::Value *metadata = IGF.IGM.getAddrOfTypeMetadata(type, false);
-        metadata = IGF.Builder.CreateBitCast(metadata, IGF.IGM.ObjCClassPtrTy);
-        metadata = IGF.Builder.CreateCall(IGF.IGM.getGetInitializedObjCClassFn(),
-                                          metadata);
-        return IGF.Builder.CreateBitCast(metadata, IGF.IGM.TypeMetadataPtrTy);
-      }
-
-    // Imported value types require foreign metadata uniquing too.
-    } else if (nominal->hasClangNode()) {
+  // Non-native types are just wrapped in various ways.
+  if (auto classDecl = dyn_cast<ClassDecl>(typeDecl)) {
+    // We emit a completely different pattern for foreign classes.
+    if (classDecl->getForeignClassKind() == ClassDecl::ForeignKind::CFType) {
       return emitForeignTypeMetadataRef(IGF, type);
     }
 
-    // If we have a pattern but no generic substitutions, we're just
-    // doing resilient type layout.
-    if (isPattern) {
-      llvm::Constant *getter = IGF.IGM.getGetResilientMetadataFn();
-
-      llvm::Value *metadata = IGF.IGM.getAddrOfTypeMetadata(type, true);
-      auto result = IGF.Builder.CreateCall(getter, {metadata});
-      result->setDoesNotThrow();
-      result->addAttribute(llvm::AttributeSet::FunctionIndex,
-                           llvm::Attribute::ReadNone);
-      return result;
+    // Classes that might not have Swift metadata use a different
+    // symbol name.
+    if (!hasKnownSwiftMetadata(IGF.IGM, classDecl)) {
+      return emitObjCMetadataRef(IGF, classDecl);
     }
 
-    // Accessor is trivial, just return pointer to constant metadata.
-    return IGF.IGM.getAddrOfTypeMetadata(type, false);
+  // Imported value types require foreign metadata uniquing.
+  } else if (typeDecl->hasClangNode()) {
+    return emitForeignTypeMetadataRef(IGF, type);
   }
 
-  return emitDirectTypeMetadataRef(IGF, type);
+  // Okay, everything else is built from a Swift metadata object.
+  llvm::Constant *metadata = IGF.IGM.getAddrOfTypeMetadata(type, false);
+
+  // We should not be doing more serious work along this path.
+  assert(isTypeMetadataAccessTrivial(IGF.IGM, type));
+
+  return metadata;
 }
+
+using MetadataAccessGenerator =
+  llvm::function_ref<llvm::Value*(IRGenFunction &IGF, llvm::Constant *cache)>;
 
 /// Get or create an accessor function to the given non-dependent type.
 static llvm::Function *getTypeMetadataAccessFunction(IRGenModule &IGM,
-                                                 CanType type,
-                                                 ForDefinition_t shouldDefine) {
+                                        CanType type,
+                                        ForDefinition_t shouldDefine,
+                                        MetadataAccessGenerator &&generator) {
   assert(!type->hasArchetype());
-  assert(!isa<UnboundGenericType>(type));
+  // Type should be bound unless it's type erased.
+  assert(isTypeErasedGenericClassType(type)
+           ? !isa<BoundGenericType>(type)
+           : !isa<UnboundGenericType>(type));
 
   llvm::Function *accessor =
     IGM.getAddrOfTypeMetadataAccessFunction(type, shouldDefine);
@@ -1169,10 +1398,23 @@ static llvm::Function *getTypeMetadataAccessFunction(IRGenModule &IGM,
 
   emitLazyCacheAccessFunction(IGM, accessor, cacheVariable,
                               [&](IRGenFunction &IGF) -> llvm::Value* {
-    return emitMetadataAccessFunction(IGF, type);
+    return generator(IGF, cacheVariable);
   });
 
   return accessor;
+}
+
+/// Get or create an accessor function to the given non-dependent type.
+static llvm::Function *getTypeMetadataAccessFunction(IRGenModule &IGM,
+                                                 CanType type,
+                                                 ForDefinition_t shouldDefine) {
+  return getTypeMetadataAccessFunction(IGM, type, shouldDefine,
+                                       [&](IRGenFunction &IGF,
+                                           llvm::Constant *cacheVariable) {
+    // We should not be called with ForDefinition for nominal types
+    // that require in-place initialization.
+    return emitTypeMetadataAccessFunctionBody(IGF, type);
+  });
 }
 
 /// Get or create an accessor function to the given generic type.
@@ -1180,6 +1422,7 @@ static llvm::Function *getGenericTypeMetadataAccessFunction(IRGenModule &IGM,
                                                  NominalTypeDecl *nominal,
                                                  ForDefinition_t shouldDefine) {
   assert(nominal->isGenericContext());
+  assert(!isTypeErasedGenericClass(nominal));
 
   GenericArguments genericArgs;
   genericArgs.collectTypes(IGM, nominal);
@@ -1201,17 +1444,33 @@ static llvm::Function *getGenericTypeMetadataAccessFunction(IRGenModule &IGM,
   return accessor;
 }
 
-/// Force a public metadata access function into existence if necessary
-/// for the given type.
-static void maybeEmitTypeMetadataAccessFunction(IRGenModule &IGM,
-                                                NominalTypeDecl *theDecl) {
+/// Return the type metadata access function for the given type, if it
+/// is guaranteed to exist.
+static llvm::Constant *
+getRequiredTypeMetadataAccessFunction(IRGenModule &IGM,
+                                      NominalTypeDecl *theDecl,
+                                      ForDefinition_t shouldDefine) {
+  if (!hasRequiredTypeMetadataAccessFunction(IGM, theDecl))
+    return nullptr;
+
   if (theDecl->isGenericContext()) {
-    (void) getGenericTypeMetadataAccessFunction(IGM, theDecl, ForDefinition);
-    return;
+    return getGenericTypeMetadataAccessFunction(IGM, theDecl, shouldDefine);
   }
 
   CanType declaredType = theDecl->getDeclaredType()->getCanonicalType();
-  (void) getTypeMetadataAccessFunction(IGM, declaredType, ForDefinition);
+  return getTypeMetadataAccessFunction(IGM, declaredType, shouldDefine);
+}
+
+/// Force a public metadata access function into existence if necessary
+/// for the given type.
+template <class BuilderTy>
+static void maybeEmitNominalTypeMetadataAccessFunction(IRGenModule &IGM,
+                                                NominalTypeDecl *theDecl,
+                                                       BuilderTy &builder) {
+  if (!hasRequiredTypeMetadataAccessFunction(IGM, theDecl))
+    return;
+
+  builder.createMetadataAccessFunction();
 }
 
 /// Emit a call to the type metadata accessor for the given function.
@@ -1226,7 +1485,7 @@ static llvm::Value *emitCallToTypeMetadataAccessFunction(IRGenFunction &IGF,
   llvm::Constant *accessor =
     getTypeMetadataAccessFunction(IGF.IGM, type, shouldDefine);
   llvm::CallInst *call = IGF.Builder.CreateCall(accessor, {});
-  call->setCallingConv(IGF.IGM.RuntimeCC);
+  call->setCallingConv(IGF.IGM.DefaultCC);
   call->setDoesNotAccessMemory();
   call->setDoesNotThrow();
   
@@ -1238,6 +1497,8 @@ static llvm::Value *emitCallToTypeMetadataAccessFunction(IRGenFunction &IGF,
 
 /// Produce the type metadata pointer for the given type.
 llvm::Value *IRGenFunction::emitTypeMetadataRef(CanType type) {
+  type = getRuntimeReifiedType(IGM, type);
+
   if (type->hasArchetype() ||
       isTypeMetadataAccessTrivial(IGM, type)) {
     return emitDirectTypeMetadataRef(*this, type);
@@ -1258,6 +1519,8 @@ llvm::Value *IRGenFunction::emitTypeMetadataRef(CanType type) {
 /// for the given non-dependent type.
 llvm::Function *irgen::getOrCreateTypeMetadataAccessFunction(IRGenModule &IGM,
                                                              CanType type) {
+  type = getRuntimeReifiedType(IGM, type);
+
   assert(!type->hasArchetype() &&
          "cannot create global function to return dependent type metadata");
 
@@ -1327,7 +1590,6 @@ namespace {
         auto call = IGF.Builder.CreateCall(IGF.IGM.getGetTupleMetadata2Fn(),
                                            args);
         call->setDoesNotThrow();
-        call->setCallingConv(IGF.IGM.RuntimeCC);
         return setLocal(CanType(type), call);
       }
 
@@ -1347,7 +1609,6 @@ namespace {
         auto call = IGF.Builder.CreateCall(IGF.IGM.getGetTupleMetadata3Fn(),
                                            args);
         call->setDoesNotThrow();
-        call->setCallingConv(IGF.IGM.RuntimeCC);
         return setLocal(CanType(type), call);
       }
       default:
@@ -1387,7 +1648,6 @@ namespace {
         auto call = IGF.Builder.CreateCall(IGF.IGM.getGetTupleMetadataFn(),
                                            args);
         call->setDoesNotThrow();
-        call->setCallingConv(IGF.IGM.RuntimeCC);
 
         IGF.Builder.CreateLifetimeEnd(buffer,
                                     IGF.IGM.getPointerSize() * elements.size());
@@ -1521,7 +1781,8 @@ namespace {
       if (t == C.TheEmptyTupleType
           || t == C.TheNativeObjectType
           || t == C.TheUnknownObjectType
-          || t == C.TheBridgeObjectType)
+          || t == C.TheBridgeObjectType
+          || t == C.TheRawPointerType)
         return true;
       if (auto intTy = dyn_cast<BuiltinIntegerType>(t)) {
         auto width = intTy->getWidth();
@@ -1669,7 +1930,7 @@ namespace {
       SmallVector<ProtocolDecl*, 2> protocols;
       if (referent.isAnyExistentialType(protocols))
         for (auto *proto : protocols)
-          if (IGF.IGM.SILMod->Types.protocolRequiresWitnessTable(proto))
+          if (IGF.getSILTypes().protocolRequiresWitnessTable(proto))
             return visitType(type);
 
       // Unmanaged references are plain pointers with extra inhabitants,
@@ -1736,11 +1997,16 @@ llvm::Value *IRGenFunction::emitTypeLayoutRef(SILType type) {
 
 void IRGenModule::setTrueConstGlobal(llvm::GlobalVariable *var) {
   switch (TargetInfo.OutputObjectFormat) {
+  case llvm::Triple::UnknownObjectFormat:
+    llvm_unreachable("unknown object format");
   case llvm::Triple::MachO:
-    var->setSection("__TEXT, __const");
+    var->setSection("__TEXT,__const");
     break;
-  // TODO: ELF?
-  default:
+  case llvm::Triple::ELF:
+    var->setSection(".rodata");
+    break;
+  case llvm::Triple::COFF:
+    var->setSection(".rdata");
     break;
   }
 }
@@ -1767,10 +2033,7 @@ llvm::Value *irgen::emitClassHeapMetadataRef(IRGenFunction &IGF, CanType type,
     return classPtr;
   }
   
-  // ObjC-defined classes will always be top-level non-generic classes.
-
-  if (auto classType = dyn_cast<ClassType>(type)) {
-    auto theClass = classType->getDecl();
+  if (ClassDecl *theClass = type->getClassOrBoundGenericClass()) {
     if (!hasKnownSwiftMetadata(IGF.IGM, theClass)) {
       llvm::Value *result =
         emitObjCHeapMetadataRef(IGF, theClass, allowUninitialized);
@@ -1778,47 +2041,12 @@ llvm::Value *irgen::emitClassHeapMetadataRef(IRGenFunction &IGF, CanType type,
         result = IGF.Builder.CreateBitCast(result, IGF.IGM.TypeMetadataPtrTy);
       return result;
     }
-  } else {
-    auto genericType = cast<BoundGenericClassType>(type);
-    assert(hasKnownSwiftMetadata(IGF.IGM, genericType->getDecl()));
-    (void) genericType;
   }
 
   llvm::Value *result = IGF.emitTypeMetadataRef(type);
   if (desiredType == MetadataValueType::ObjCClass)
     result = IGF.Builder.CreateBitCast(result, IGF.IGM.ObjCClassPtrTy);
   return result;
-}
-
-namespace {
-  /// A CRTP type visitor for deciding whether the metatype for a type
-  /// has trivial representation.
-  struct HasTrivialMetatype : CanTypeVisitor<HasTrivialMetatype, bool> {
-    /// Class metatypes have non-trivial representation due to the
-    /// possibility of subclassing.
-    bool visitClassType(CanClassType type) {
-      return false;
-    }
-    bool visitBoundGenericClassType(CanBoundGenericClassType type) {
-      return false;
-    }
-
-    /// Archetype metatypes have non-trivial representation in case
-    /// they instantiate to a class metatype.
-    bool visitArchetypeType(CanArchetypeType type) {
-      return false;
-    }
-    
-    /// All levels of class metatypes support subtyping.
-    bool visitMetatypeType(CanMetatypeType type) {
-      return visit(type.getInstanceType());
-    }
-
-    /// Everything else is trivial.
-    bool visitType(CanType type) {
-      return false;
-    }
-  };
 }
 
 /// Emit a metatype value for a known type.
@@ -1844,182 +2072,23 @@ void irgen::emitMetatypeRef(IRGenFunction &IGF, CanMetatypeType type,
 /** Nominal Type Descriptor Emission *****************************************/
 /*****************************************************************************/
 
-namespace {
-  class ConstantBuilderBase {
-  protected:
-    IRGenModule &IGM;
-    ConstantBuilderBase(IRGenModule &IGM) : IGM(IGM) {}
-  };
-
-  template <class Base = ConstantBuilderBase>
-  class ConstantBuilder : public Base {
-  protected:
-    template <class... T>
-    ConstantBuilder(T &&...args) : Base(std::forward<T>(args)...) {}
-
-    IRGenModule &IGM = Base::IGM;
-
-  private:
-    llvm::GlobalVariable *relativeAddressBase = nullptr;
-    llvm::SmallVector<llvm::Constant*, 16> Fields;
-    Size NextOffset = Size(0);
-
-  protected:
-    Size getNextOffset() const { return NextOffset; }
-
-    /// Add a constant word-sized value.
-    void addConstantWord(int64_t value) {
-      addWord(llvm::ConstantInt::get(IGM.SizeTy, value));
-    }
-
-    /// Add a word-sized value.
-    void addWord(llvm::Constant *value) {
-      assert(value->getType() == IGM.IntPtrTy ||
-             value->getType()->isPointerTy());
-      assert(NextOffset.isMultipleOf(IGM.getPointerSize()));
-      Fields.push_back(value);
-      NextOffset += IGM.getPointerSize();
-    }
-
-    void setRelativeAddressBase(llvm::GlobalVariable *base) {
-      relativeAddressBase = base;
-    }
-
-    llvm::Constant *getRelativeAddressFromNextField(llvm::Constant *referent) {
-      assert(relativeAddressBase && "no relative address base set");
-      // Determine the address of the next field in the initializer.
-      llvm::Constant *fieldAddr =
-        llvm::ConstantExpr::getPtrToInt(relativeAddressBase, IGM.SizeTy);
-      fieldAddr = llvm::ConstantExpr::getAdd(fieldAddr,
-                            llvm::ConstantInt::get(IGM.SizeTy,
-                                                   getNextOffset().getValue()));
-      referent = llvm::ConstantExpr::getPtrToInt(referent, IGM.SizeTy);
-
-      llvm::Constant *relative
-        = llvm::ConstantExpr::getSub(referent, fieldAddr);
-      
-      if (relative->getType() != IGM.RelativeAddressTy)
-        relative = llvm::ConstantExpr::getTrunc(relative,
-                                                IGM.RelativeAddressTy);
-      return relative;
-    }
-
-    /// Add a 32-bit relative address from the current location in the local
-    /// being built to another global variable.
-    void addRelativeAddress(llvm::Constant *referent) {
-      addInt32(getRelativeAddressFromNextField(referent));
-    }
-
-    /// Add a 32-bit relative address from the current location in the local
-    /// being built to another global variable, or null if a null referent
-    /// is passed.
-    void addRelativeAddressOrNull(llvm::Constant *referent) {
-      if (referent)
-        addRelativeAddress(referent);
-      else
-        addConstantInt32(0);
-    }
-
-    /// Add a 32-bit relative address from the current location in the local
-    /// being built to another global variable. Pack a constant integer into
-    /// the alignment bits of the pointer.
-    void addRelativeAddressWithTag(llvm::Constant *referent,
-                                   unsigned tag) {
-      assert(tag < 4 && "tag too big to pack in relative address");
-      llvm::Constant *relativeAddr = getRelativeAddressFromNextField(referent);
-      relativeAddr = llvm::ConstantExpr::getAdd(relativeAddr,
-                            llvm::ConstantInt::get(IGM.RelativeAddressTy, tag));
-      addInt32(relativeAddr);
-    }
-
-    /// Add a uint32_t value that represents the given offset
-    /// scaled to a number of words.
-    void addConstantInt32InWords(Size value) {
-      addConstantInt32(getOffsetInWords(IGM, value));
-    }
-
-    /// Add a constant 32-bit value.
-    void addConstantInt32(int32_t value) {
-      addInt32(llvm::ConstantInt::get(IGM.Int32Ty, value));
-    }
-
-    /// Add a 32-bit value.
-    void addInt32(llvm::Constant *value) {
-      assert(value->getType() == IGM.Int32Ty);
-      assert(NextOffset.isMultipleOf(Size(4)));
-      Fields.push_back(value);
-      NextOffset += Size(4);
-    }
-
-    /// Add a constant 16-bit value.
-    void addConstantInt16(int16_t value) {
-      addInt16(llvm::ConstantInt::get(IGM.Int16Ty, value));
-    }
-
-    /// Add a 16-bit value.
-    void addInt16(llvm::Constant *value) {
-      assert(value->getType() == IGM.Int16Ty);
-      assert(NextOffset.isMultipleOf(Size(2)));
-      Fields.push_back(value);
-      NextOffset += Size(2);
-    }
-
-    /// Add a constant 8-bit value.
-    void addConstantInt8(int8_t value) {
-      addInt8(llvm::ConstantInt::get(IGM.Int8Ty, value));
-    }
-
-    /// Add an 8-bit value.
-    void addInt8(llvm::Constant *value) {
-      assert(value->getType() == IGM.Int8Ty);
-      assert(NextOffset.isMultipleOf(Size(1)));
-      Fields.push_back(value);
-      NextOffset += Size(1);
-    }
-
-    /// Add a constant of the given size.
-    void addStruct(llvm::Constant *value, Size size) {
-      assert(size.getValue()
-               == IGM.DataLayout.getTypeStoreSize(value->getType()));
-      assert(NextOffset.isMultipleOf(
-                  Size(IGM.DataLayout.getABITypeAlignment(value->getType()))));
-      Fields.push_back(value);
-      NextOffset += size;
-    }
-    
-    class ReservationToken {
-      size_t Index;
-      ReservationToken(size_t index) : Index(index) {}
-      friend ConstantBuilder<Base>;
-    };
-    ReservationToken reserveFields(unsigned numFields, Size size) {
-      unsigned index = Fields.size();
-      Fields.append(numFields, nullptr);
-      NextOffset += size;
-      return ReservationToken(index);
-    }
-    MutableArrayRef<llvm::Constant*> claimReservation(ReservationToken token,
-                                                      unsigned numFields) {
-      return MutableArrayRef<llvm::Constant*>(&Fields[0] + token.Index,
-                                              numFields);
-    }
-
-  public:
-    llvm::Constant *getInit() const {
-      return llvm::ConstantStruct::getAnon(Fields);
-    }
-
-    /// An optimization of getInit for when we have a known type we
-    /// can use when there aren't any extra fields.
-    llvm::Constant *getInitWithSuggestedType(unsigned numFields,
-                                             llvm::StructType *type) {
-      if (Fields.size() == numFields) {
-        return llvm::ConstantStruct::get(type, Fields);
-      } else {
-        return getInit();
-      }
-    }
-  };
+namespace {  
+  /// Helper to produce a dummy value that can stand in for a global constant
+  /// for us to build relative references against before the constant is
+  /// instantiated.
+  static std::unique_ptr<llvm::GlobalVariable>
+  createTemporaryRelativeAddressBase(IRGenModule &IGM) {
+    return std::unique_ptr<llvm::GlobalVariable>(
+      new llvm::GlobalVariable(IGM.Int8Ty, true,
+                               llvm::GlobalValue::PrivateLinkage));
+  }
+  
+  static void
+  replaceTemporaryRelativeAddressBase(IRGenModule &IGM,
+            std::unique_ptr<llvm::GlobalVariable> temp, llvm::Constant *real) {
+    real = llvm::ConstantExpr::getBitCast(real, IGM.Int8PtrTy);
+    temp->replaceAllUsesWith(real);
+  }
 
   template<class Impl>
   class NominalTypeDescriptorBuilderBase : public ConstantBuilder<> {
@@ -2032,81 +2101,74 @@ namespace {
       asImpl().addName();
       asImpl().addKindDependentFields();
       asImpl().addGenericMetadataPatternAndKind();
+      asImpl().addAccessFunction();
       asImpl().addGenericParams();
     }
 
+    CanType getAbstractType() {
+      return asImpl().getTarget()->getDeclaredType()->getCanonicalType();
+    }
+
     void addName() {
-      NominalTypeDecl *ntd = asImpl().getTarget();
-      addRelativeAddress(getMangledTypeName(IGM,
-                                 ntd->getDeclaredType()->getCanonicalType(),
+      addRelativeAddress(getMangledTypeName(IGM, getAbstractType(),
                                  /*willBeRelativelyAddressed*/ true));
     }
     
     void addGenericMetadataPatternAndKind() {
       NominalTypeDecl *ntd = asImpl().getTarget();
       auto kind = asImpl().getKind();
-      if (!IGM.hasMetadataPattern(ntd)) {
+      if (!ntd->isGenericContext()) {
         // There's no pattern to link.
         addConstantInt32(kind);
         return;
       }
 
       addRelativeAddressWithTag(
-        IGM.getAddrOfTypeMetadata(ntd->getDeclaredType()->getCanonicalType(),
-                                  /*pattern*/ true),
+        IGM.getAddrOfTypeMetadata(getAbstractType(), /*pattern*/ true),
         kind);
+    }
+
+    void addAccessFunction() {
+      NominalTypeDecl *typeDecl = asImpl().getTarget();
+      llvm::Constant *accessFn =
+        getRequiredTypeMetadataAccessFunction(IGM, typeDecl, NotForDefinition);
+      addRelativeAddressOrNull(accessFn);
     }
     
     void addGenericParams() {
       NominalTypeDecl *ntd = asImpl().getTarget();
-      if (!ntd->getGenericParams()) {
-        // If there are no generic parameters, there is no generic parameter
-        // vector.
-        addConstantInt32(0);
-        addConstantInt32(0);
-        addConstantInt32(0);
 
-        return;
-      }
-      
       // uint32_t GenericParameterVectorOffset;
       addConstantInt32InWords(asImpl().getGenericParamsOffset());
 
       // The archetype order here needs to be consistent with
       // MetadataLayout::addGenericFields.
       
-      // Note that we intentionally don't forward the generic arguments.
+      GenericTypeRequirements requirements(IGM, ntd);
       
-      // Add all the primary archetypes.
-      // TODO: only the *primary* archetypes.
-      // TODO: not archetypes from outer contexts.
-      auto allArchetypes = ntd->getGenericParams()->getAllArchetypes();
-      
-      // uint32_t NumGenericParameters;
-      addConstantInt32(allArchetypes.size());
+      // uint32_t NumGenericRequirements;
+      addConstantInt32(requirements.getStorageSizeInWords());
 
       // uint32_t NumPrimaryGenericParameters;
-      addConstantInt32(ntd->getGenericParams()->getPrimaryArchetypes().size());
-      
-      // GenericParameter Parameters[NumGenericParameters];
-      // struct GenericParameter {
-      for (auto archetype : allArchetypes) {
-        //   uint32_t NumWitnessTables;
-        // Count the protocol conformances that require witness tables.
-        unsigned count = std::count_if(
-                archetype->getConformsTo().begin(),
-                archetype->getConformsTo().end(),
-                Lowering::TypeConverter::protocolRequiresWitnessTable);
-        addConstantInt32(count);
-      }
+      addConstantInt32(requirements.getNumTypeRequirements());
+
+      // GenericParameterDescriptorFlags Flags;
+      GenericParameterDescriptorFlags flags;
+      if (ntd->getDeclContext()->isTypeContext())
+        flags = flags.withHasParent(true);
+      if (requirements.hasParentType())
+        flags = flags.withHasGenericParent(true);
+      addConstantInt32(flags.getIntValue());
+
+      // TODO: provide reflective descriptions of the type and
+      // conformance requirements stored here.
+
       // };
     }
     
     llvm::Constant *emit() {
       // Set up a dummy global to stand in for the constant.
-      std::unique_ptr<llvm::GlobalVariable> tempBase(
-                   new llvm::GlobalVariable(IGM.Int8Ty, true,
-                                            llvm::GlobalValue::PrivateLinkage));
+      auto tempBase = createTemporaryRelativeAddressBase(IGM);
       setRelativeAddressBase(tempBase.get());
       asImpl().layout();
       auto init = getInit();
@@ -2118,9 +2180,7 @@ namespace {
       var->setInitializer(init);
       IGM.setTrueConstGlobal(var);
 
-      auto replacer = llvm::ConstantExpr::getBitCast(var, IGM.Int8PtrTy);
-      tempBase->replaceAllUsesWith(replacer);
-
+      replaceTemporaryRelativeAddressBase(IGM, std::move(tempBase), var);
       return var;
     }
     
@@ -2167,7 +2227,7 @@ namespace {
     }
 
     Size::int_type getTargetIndex() {
-      return getOffsetInWords(this->IGM, getTargetOffset());
+      return this->IGM.getOffsetInWords(getTargetOffset());
     }
   };
 
@@ -2337,7 +2397,7 @@ namespace {
                                        + type->getName().str(),
                                      IGM.getModule());
     fn->setAttributes(IGM.constructInitialAttributes());
-    
+
     // Emit the body of the field type accessor later. We need to access
     // the type metadata for the fields, which could lead to infinite recursion
     // in recursive types if we build the field type accessor during metadata
@@ -2354,8 +2414,10 @@ namespace {
                          NominalTypeDecl::StoredPropertyRange storedProperties){
     SmallVector<FieldTypeInfo, 4> types;
     for (VarDecl *prop : storedProperties) {
-      types.push_back(FieldTypeInfo(prop->getType()->getCanonicalType(),
-                                    /*indirect*/ false));
+      auto propertyType = prop->getType()->getCanonicalType();
+      types.push_back(FieldTypeInfo(propertyType,
+                                    /*indirect*/ false,
+                                    propertyType->is<WeakStorageType>()));
     }
     return getFieldTypeAccessorFn(IGM, type, types);
   }
@@ -2371,7 +2433,7 @@ namespace {
       auto caseType = elt.decl->getArgumentType()->getCanonicalType();
       bool isIndirect = elt.decl->isIndirect()
         || elt.decl->getParentEnum()->isIndirect();
-      types.push_back(FieldTypeInfo(caseType, isIndirect));
+      types.push_back(FieldTypeInfo(caseType, isIndirect, /*weak*/ false));
     }
     return getFieldTypeAccessorFn(IGM, type, types);
   }
@@ -2404,9 +2466,8 @@ namespace {
         
         void noteAddressPoint() { AddressPoint = NextOffset; }
         void noteStartOfFieldOffsets() { FieldVectorOffset = NextOffset; }
-        void addGenericFields(const GenericParamList &g) {
+        void noteStartOfGenericRequirements() {
           GenericParamsOffset = NextOffset;
-          StructMetadataScanner::addGenericFields(g);
         }
       };
       
@@ -2488,11 +2549,10 @@ namespace {
             FieldVectorOffset = NextOffset;
           }
         }
-        void addGenericFields(const GenericParamList &g, ClassDecl *c) {
+        void noteStartOfGenericRequirements(ClassDecl *c) {
           if (c == Target) {
             GenericParamsOffset = NextOffset;
           }
-          ClassMetadataScanner::addGenericFields(g, c);
         }
       };
       
@@ -2572,9 +2632,8 @@ namespace {
           PayloadSizeOffset = NextOffset;
           EnumMetadataScanner::addPayloadSize();
         }
-        void addGenericFields(const GenericParamList &g) {
+        void noteStartOfGenericRequirements() {
           GenericParamsOffset = NextOffset;
-          EnumMetadataScanner::addGenericFields(g);
         }
       };
       
@@ -2628,13 +2687,14 @@ namespace {
       addRelativeAddress(caseTypeVectorAccessor);
     }
   };
+
 }
 
 void
 IRGenModule::addLazyFieldTypeAccessor(NominalTypeDecl *type,
                                       ArrayRef<FieldTypeInfo> fieldTypes,
                                       llvm::Function *fn) {
-  dispatcher.addLazyFieldTypeAccessor(type, fieldTypes, fn, this);
+  IRGen.addLazyFieldTypeAccessor(type, fieldTypes, fn, this);
 }
 
 void
@@ -2644,6 +2704,9 @@ irgen::emitFieldTypeAccessor(IRGenModule &IGM,
                              ArrayRef<FieldTypeInfo> fieldTypes)
 {
   IRGenFunction IGF(IGM, fn);
+  if (IGM.DebugInfo)
+    IGM.DebugInfo->emitArtificialFunction(IGF, fn);
+
   auto metadataArrayPtrTy = IGM.TypeMetadataPtrTy->getPointerTo();
 
   CanType formalType = type->getDeclaredTypeInContext()->getCanonicalType();
@@ -2657,7 +2720,7 @@ irgen::emitFieldTypeAccessor(IRGenModule &IGM,
   
   // If the type is not generic, we can use a global variable to cache the
   // address of the field type vector for the single instance.
-  if (!type->getGenericParamsOfContext()) {
+  if (!type->isGenericContext()) {
     vectorPtr = new llvm::GlobalVariable(*IGM.getModule(),
                                          metadataArrayPtrTy,
                                          /*constant*/ false,
@@ -2673,7 +2736,7 @@ irgen::emitFieldTypeAccessor(IRGenModule &IGM,
     vectorPtr = IGF.Builder.CreateBitCast(metadata,
                                           metadataArrayPtrTy->getPointerTo());
     vectorPtr = IGF.Builder.CreateConstInBoundsGEP1_32(
-        /*Ty=*/nullptr, vectorPtr, getOffsetInWords(IGM, offset));
+        /*Ty=*/nullptr, vectorPtr, IGM.getOffsetInWords(offset));
   }
   
   // First, see if the field type vector has already been populated. This
@@ -2723,9 +2786,13 @@ irgen::emitFieldTypeAccessor(IRGenModule &IGM,
     
     auto metadata = IGF.emitTypeMetadataRef(fieldTy);
 
+    auto fieldTypeInfo = fieldTypes[i];
+
     // Mix in flag bits.
-    if (fieldTypes[i].isIndirect()) {
-      auto flags = FieldType().withIndirect(true);
+    if (fieldTypeInfo.hasFlags()) {
+      auto flags = FieldType()
+        .withIndirect(fieldTypeInfo.isIndirect())
+        .withWeak(fieldTypeInfo.isWeak());
       auto metadataBits = IGF.Builder.CreatePtrToInt(metadata, IGF.IGM.SizeTy);
       metadataBits = IGF.Builder.CreateOr(metadataBits,
                    llvm::ConstantInt::get(IGF.IGM.SizeTy, flags.getIntValue()));
@@ -2746,6 +2813,10 @@ irgen::emitFieldTypeAccessor(IRGenModule &IGM,
                                zero, builtVectorInt,
                                llvm::AtomicOrdering::SequentiallyConsistent,
                                llvm::AtomicOrdering::SequentiallyConsistent);
+
+  // We might have added internal control flow above.
+  buildBB = IGF.Builder.GetInsertBlock();
+
   // The pointer in the slot should still have been null.
   auto didStore = IGF.Builder.CreateExtractValue(raceVectorInt, 1);
   raceVectorInt = IGF.Builder.CreateExtractValue(raceVectorInt, 0);
@@ -2785,9 +2856,10 @@ namespace {
     unsigned NumGenericWitnesses = 0;
 
     struct FillOp {
-      CanArchetypeType Archetype;
-      ProtocolDecl *Protocol;
+      CanType Type;
+      Optional<ProtocolConformanceRef> Conformance;
       Size ToOffset;
+      bool IsRelative;
     };
 
     SmallVector<FillOp, 8> FillOps;
@@ -2802,6 +2874,7 @@ namespace {
     
     IRGenModule &IGM = super::IGM;
     using super::asImpl;
+    using super::Target;
     
     /// Set to true if the metadata record for the generic type has fields
     /// outside of the generic parameter vector.
@@ -2829,11 +2902,17 @@ namespace {
       llvm::Function *f = llvm::Function::Create(ty,
                                            llvm::GlobalValue::PrivateLinkage,
                                            llvm::Twine("create_generic_metadata_")
-                                               + super::Target->getName().str(),
+                                               + Target->getName().str(),
                                            &IGM.Module);
       f->setAttributes(IGM.constructInitialAttributes());
       
       IRGenFunction IGF(IGM, f);
+
+      // Skip instrumentation when building for TSan to avoid false positives.
+      // The synchronization for this happens in the Runtime and we do not see it.
+      if (IGM.IRGen.Opts.Sanitize == SanitizerKind::Thread)
+        f->removeFnAttr(llvm::Attribute::SanitizeThread);
+
       if (IGM.DebugInfo)
         IGM.DebugInfo->emitArtificialFunction(IGF, f);
 
@@ -2842,10 +2921,10 @@ namespace {
       llvm::Value *args = params.claimNext();
 
       // Bind the generic arguments.
-      auto generics = super::Target->getGenericParamsOfContext();
-      Address argsArray(args, IGM.getPointerAlignment());
-      if (generics)
-        emitPolymorphicParametersFromArray(IGF, *generics, argsArray);
+      if (Target->isGenericContext()) {
+        Address argsArray(args, IGM.getPointerAlignment());
+        emitPolymorphicParametersFromArray(IGF, Target, argsArray);
+      }
 
       // Allocate the metadata.
       llvm::Value *metadataValue =
@@ -2858,17 +2937,27 @@ namespace {
       
       for (auto &fillOp : FillOps) {
         llvm::Value *value;
-        if (fillOp.Protocol) {
-          value = emitArchetypeWitnessTableRef(IGF, fillOp.Archetype,
-                                               fillOp.Protocol);
+        if (fillOp.Conformance) {
+          value = emitWitnessTableRef(IGF, fillOp.Type, *fillOp.Conformance);
         } else {
-          value = IGF.getLocalTypeData(fillOp.Archetype,
-                                       LocalTypeDataKind::forTypeMetadata());
+          value = IGF.emitTypeMetadataRef(fillOp.Type);
         }
-        value = IGF.Builder.CreateBitCast(value, IGM.Int8PtrTy);
+
         auto dest = createPointerSizedGEP(IGF, metadataWords,
                                           fillOp.ToOffset - AddressPoint);
-        IGF.Builder.CreateStore(value, dest);
+
+        // A far relative indirectable pointer.
+        if (fillOp.IsRelative) {
+          dest = IGF.Builder.CreateElementBitCast(dest,
+                                                  IGM.FarRelativeAddressTy);
+          IGF.emitStoreOfRelativeIndirectablePointer(value, dest,
+                                                     /*isFar*/ true);
+
+        // A direct pointer.
+        } else {
+          value = IGF.Builder.CreateBitCast(value, IGM.Int8PtrTy);
+          IGF.Builder.CreateStore(value, dest);
+        }
       }
       
       // Initialize the instantiated dependent value witness table, if we have
@@ -2902,8 +2991,17 @@ namespace {
       
       return f;
     }
+
+    void addFillOp(CanType type, Optional<ProtocolConformanceRef> conf,
+                   bool isRelative) {
+      FillOps.push_back({type, conf, getNextOffset(), isRelative });
+    }
     
   public:
+    void createMetadataAccessFunction() {
+      (void) getGenericTypeMetadataAccessFunction(IGM, Target, ForDefinition);
+    }
+
     void layout() {
       TemplateHeaderSize =
         ((NumPrivateDataWords + 1) * IGM.getPointerSize()) + Size(8);
@@ -2945,8 +3043,10 @@ namespace {
       //   uint16_t NumArguments;
       // TODO: ultimately, this should be the number of actual template
       // arguments, not the number of witness tables required.
+      unsigned numGenericArguments =
+        GenericArguments::getNumGenericArguments(IGM, Target);
       headerFields[Field++]
-        = llvm::ConstantInt::get(IGM.Int16Ty, NumGenericWitnesses);
+        = llvm::ConstantInt::get(IGM.Int16Ty, numGenericArguments);
 
       //   uint16_t AddressPoint;
       assert(!AddressPoint.isInvalid() && "address point not noted!");
@@ -2972,18 +3072,18 @@ namespace {
     }
 
     template <class... T>
-    void addGenericArgument(ArchetypeType *type, T &&...args) {
+    void addGenericArgument(CanType type, T &&...args) {
       NumGenericWitnesses++;
-      FillOps.push_back({ CanArchetypeType(type), nullptr, getNextOffset() });
+      addFillOp(type, None, /*relative*/ false);
       super::addGenericArgument(type, std::forward<T>(args)...);
     }
 
     template <class... T>
-    void addGenericWitnessTable(ArchetypeType *type, ProtocolDecl *protocol,
+    void addGenericWitnessTable(CanType type, ProtocolConformanceRef conf,
                                 T &&...args) {
       NumGenericWitnesses++;
-      FillOps.push_back({ CanArchetypeType(type), protocol, getNextOffset() });
-      super::addGenericWitnessTable(type, protocol, std::forward<T>(args)...);
+      addFillOp(type, conf, /*relative*/ false);
+      super::addGenericWitnessTable(type, conf, std::forward<T>(args)...);
     }
     
     void addFieldTypeVectorReferenceSlot() {
@@ -3018,6 +3118,87 @@ namespace {
 
 // Classes
 
+static Address
+emitAddressOfFieldOffsetVectorInClassMetadata(IRGenFunction &IGF,
+                                              ClassDecl *theClass,
+                                              llvm::Value *metadata) {
+  BEGIN_METADATA_SEARCHER_0(GetOffsetToFieldOffsetVector, Class)
+    void noteStartOfFieldOffsets(ClassDecl *whichClass) {
+      if (whichClass == Target)
+        setTargetOffset();
+    }
+  END_METADATA_SEARCHER()
+
+  auto offset =
+    GetOffsetToFieldOffsetVector(IGF.IGM, theClass).getTargetOffset();
+  
+  Address addr(metadata, IGF.IGM.getPointerAlignment());
+  addr = IGF.Builder.CreateBitCast(addr,
+                                   IGF.IGM.SizeTy->getPointerTo());
+  return createPointerSizedGEP(IGF, addr, offset);
+}
+
+static llvm::Value *emitInitializeFieldOffsetVector(IRGenFunction &IGF,
+                                                    ClassDecl *target,
+                                                    llvm::Value *metadata) {
+  llvm::Value *fieldVector
+    = emitAddressOfFieldOffsetVectorInClassMetadata(IGF, target, metadata)
+        .getAddress();
+  
+  // Collect the stored properties of the type.
+  llvm::SmallVector<VarDecl*, 4> storedProperties;
+  for (auto prop : target->getStoredProperties()) {
+    storedProperties.push_back(prop);
+  }
+
+  // Fill out an array with the field type metadata records.
+  Address fields = IGF.createAlloca(
+                   llvm::ArrayType::get(IGF.IGM.SizeTy,
+                                        storedProperties.size() * 2),
+                   IGF.IGM.getPointerAlignment(), "classFields");
+  IGF.Builder.CreateLifetimeStart(fields,
+                  IGF.IGM.getPointerSize() * storedProperties.size() * 2);
+  
+  Address firstField;
+  unsigned index = 0;
+  for (auto prop : storedProperties) {
+    auto propFormalTy = prop->getType()->getCanonicalType();
+    SILType propLoweredTy = IGF.IGM.getLoweredType(propFormalTy);
+    auto &propTI = IGF.getTypeInfo(propLoweredTy);
+    auto sizeAndAlignMask
+      = propTI.getSizeAndAlignmentMask(IGF, propLoweredTy);
+
+    llvm::Value *size = sizeAndAlignMask.first;
+    Address sizeAddr =
+      IGF.Builder.CreateStructGEP(fields, index, IGF.IGM.getPointerSize());
+    IGF.Builder.CreateStore(size, sizeAddr);
+    if (index == 0) firstField = sizeAddr;
+
+    llvm::Value *alignMask = sizeAndAlignMask.second;
+    Address alignMaskAddr =
+      IGF.Builder.CreateStructGEP(fields, index + 1,
+                                  IGF.IGM.getPointerSize());
+    IGF.Builder.CreateStore(alignMask, alignMaskAddr);
+
+    index += 2;
+  }
+
+  if (storedProperties.empty()) {
+    firstField = IGF.Builder.CreateStructGEP(fields, 0, Size(0));
+  }
+
+  // Ask the runtime to lay out the class.  This can relocate it if it
+  // wasn't allocated with swift_allocateGenericClassMetadata.
+  auto numFields = IGF.IGM.getSize(Size(storedProperties.size()));
+  metadata = IGF.Builder.CreateCall(IGF.IGM.getInitClassMetadataUniversalFn(),
+                                    {metadata, numFields,
+                                     firstField.getAddress(), fieldVector});
+  IGF.Builder.CreateLifetimeEnd(fields,
+                  IGF.IGM.getPointerSize() * storedProperties.size() * 2);
+
+  return metadata;
+}
+
 namespace {
   /// An adapter for laying out class metadata.
   template <class Impl>
@@ -3028,8 +3209,9 @@ namespace {
     Optional<MetadataSize> ClassObjectExtents;
 
   protected:
-    IRGenModule &IGM = super::IGM;
-    ClassDecl * const& Target = super::Target;
+    using super::IGM;
+    using super::Target;
+    using super::setRelativeAddressBase;
     using super::addWord;
     using super::addConstantWord;
     using super::addInt16;
@@ -3038,23 +3220,25 @@ namespace {
     using super::addConstantInt32;
     using super::addStruct;
     using super::getNextOffset;
+    using super::addFarRelativeAddress;
+    using super::addFarRelativeAddressOrNull;
     const StructLayout &Layout;
     const ClassLayout &FieldLayout;
     SILVTable *VTable;
 
     ClassMetadataBuilderBase(IRGenModule &IGM, ClassDecl *theClass,
                              const StructLayout &layout,
-                             const ClassLayout &fieldLayout)
+                             const ClassLayout &fieldLayout,
+                             llvm::GlobalVariable *relativeAddressBase)
       : super(IGM, theClass), Layout(layout), FieldLayout(fieldLayout) {
-      VTable = IGM.SILMod->lookUpVTable(Target);
+      setRelativeAddressBase(relativeAddressBase);
+      VTable = IGM.getSILModule().lookUpVTable(Target);
     }
 
     void computeClassObjectExtents() {
       if (ClassObjectExtents.hasValue()) return;
       ClassObjectExtents = getSizeOfMetadata(IGM, Target);
     }
-
-    bool HasRuntimeParent = false;
 
   public:
     /// The 'metadata flags' field in a class is actually a pointer to
@@ -3075,7 +3259,7 @@ namespace {
         addWord(flags);
       } else {
         // On non-objc platforms just fill it with a null, there
-        // is no objective-c metaclass.
+        // is no Objective-C metaclass.
         // FIXME: Remove this to save metadata space.
         // rdar://problem/18801263
         addWord(llvm::ConstantExpr::getNullValue(IGM.IntPtrTy));
@@ -3098,7 +3282,7 @@ namespace {
       auto dtorRef = SILDeclRef(Target->getDestructor(),
                                 SILDeclRef::Kind::Deallocator,
                                 expansion);
-      SILFunction *dtorFunc = IGM.SILMod->lookUpFunction(dtorRef);
+      SILFunction *dtorFunc = IGM.getSILModule().lookUpFunction(dtorRef);
       if (dtorFunc) {
         addWord(IGM.getAddrOfSILFunction(dtorFunc, NotForDefinition));
       } else {
@@ -3109,7 +3293,9 @@ namespace {
     }
     
     void addNominalTypeDescriptor() {
-      addWord(ClassNominalTypeDescriptorBuilder(IGM, Target).emit());
+      auto descriptor =
+        ClassNominalTypeDescriptorBuilder(IGM, Target).emit();
+      addFarRelativeAddress(descriptor);
     }
     
     void addIVarDestroyer() {
@@ -3124,18 +3310,9 @@ namespace {
       }
     }
 
-    void addParentMetadataRef(ClassDecl *forClass) {
-      // FIXME: this is wrong for multiple levels of generics; we need
-      // to apply substitutions through.
-      Type parentType =
-        forClass->getDeclContext()->getDeclaredTypeInContext();
-      if (!addReferenceToType(parentType->getCanonicalType()))
-        HasRuntimeParent = true;
-    }
-    
-    bool addReferenceToType(CanType type) {
+    bool addReferenceToHeapMetadata(CanType type, bool allowUninitialized) {
       if (llvm::Constant *metadata
-            = tryEmitConstantTypeMetadataRef(IGM, type)) {
+            = tryEmitConstantHeapMetadataRef(IGM, type, allowUninitialized)) {
         addWord(metadata);
         return true;
       } else {
@@ -3212,7 +3389,7 @@ namespace {
 
     void addClassDataPointer() {
       if (!IGM.ObjCInterop) {
-        // with no objective-c runtime, just give an empty pointer with the
+        // with no Objective-C runtime, just give an empty pointer with the
         // swift bit set.
         addWord(llvm::ConstantInt::get(IGM.IntPtrTy, 1));
         return;
@@ -3306,7 +3483,8 @@ namespace {
 
       // Find the vtable entry.
       assert(VTable && "no vtable?!");
-      if (SILFunction *func = VTable->getImplementation(*IGM.SILMod, fn)) {
+      if (SILFunction *func =
+            VTable->getImplementation(IGM.getSILModule(), fn)) {
         addWord(IGM.getAddrOfSILFunction(func, NotForDefinition));
       } else {
         // The method is removed by dead method elimination.
@@ -3316,30 +3494,119 @@ namespace {
       }
     }
 
-    void addGenericArgument(ArchetypeType *archetype, ClassDecl *forClass) {
+    void addGenericArgument(CanType argTy, ClassDecl *forClass) {
       addWord(llvm::Constant::getNullValue(IGM.TypeMetadataPtrTy));
     }
 
-    void addGenericWitnessTable(ArchetypeType *archetype,
-                                ProtocolDecl *protocol, ClassDecl *forClass) {
+    void addGenericWitnessTable(CanType argTy, ProtocolConformanceRef conf,
+                                ClassDecl *forClass) {
       addWord(llvm::Constant::getNullValue(IGM.WitnessTablePtrTy));
+    }
+
+  protected:
+    bool isFinishInitializationIdempotent() {
+      if (!Layout.isFixedLayout())
+        return false;
+
+      if (doesClassMetadataRequireDynamicInitialization(IGM, Target))
+        return false;
+
+      return true;
+    }
+
+    llvm::Value *emitFinishIdempotentInitialization(IRGenFunction &IGF,
+                                                    llvm::Value *metadata) {
+      if (IGF.IGM.ObjCInterop) {
+        metadata =
+          IGF.Builder.CreateBitCast(metadata, IGF.IGM.ObjCClassPtrTy);
+        metadata =
+          IGF.Builder.CreateCall(IGF.IGM.getGetInitializedObjCClassFn(),
+                                 metadata);
+        metadata =
+           IGF.Builder.CreateBitCast(metadata, IGF.IGM.TypeMetadataPtrTy);
+      }
+      return metadata;
+    }
+
+    llvm::Value *emitFinishInitializationOfClassMetadata(IRGenFunction &IGF,
+                                                      llvm::Value *metadata) {
+      // We assume that we've already filled in the class's generic arguments.
+      // We need to:
+      //   - relocate the metadata to accommodate the superclass,
+      //     if something in our hierarchy is resilient to us;
+      //   - fill out the subclass's field offset vector, if its layout
+      //     wasn't fixed;
+      //   - copy field offsets and generic arguments from higher in the
+      //     class hierarchy, if 
+      //   - copy the superclass data, if there are generic arguments
+      //     or field offset vectors there that weren't filled in;
+      //   - populate the field offset vector, if layout isn't fixed, and
+      //   - register the class with the ObjC runtime, if ObjC interop is
+      //     enabled.
+      //
+      // emitInitializeFieldOffsetVector will do everything in the full case.
+      if (doesClassMetadataRequireDynamicInitialization(IGF.IGM, Target)) {
+        metadata = emitInitializeFieldOffsetVector(IGF, Target, metadata);
+
+      // TODO: do something intermediate when e.g. all we needed to do was
+      // set parent metadata pointers.
+
+      // Otherwise, all we need to do is register with the ObjC runtime.
+      } else {
+        metadata = emitFinishIdempotentInitialization(IGF, metadata);
+      }
+
+      // Realizing the class with the ObjC runtime will copy back to the
+      // field offset globals for us; but if ObjC interop is disabled, we
+      // have to do that ourselves, assuming we didn't just emit them all
+      // correctly in the first place.
+      if (!Layout.isFixedLayout() && !IGF.IGM.ObjCInterop)
+        emitInitializeFieldOffsets(IGF, metadata);
+
+      return metadata;
+    }
+
+    // The Objective-C runtime will copy field offsets from the field offset
+    // vector into field offset globals for us, if present. If there's no
+    // Objective-C runtime, we have to do this ourselves.
+    void emitInitializeFieldOffsets(IRGenFunction &IGF,
+                                    llvm::Value *metadata) {
+      unsigned index = FieldLayout.InheritedStoredProperties.size();
+
+      for (auto prop : Target->getStoredProperties()) {
+        auto access = FieldLayout.AllFieldAccesses[index];
+        if (access == FieldAccess::NonConstantDirect) {
+          Address offsetA = IGF.IGM.getAddrOfFieldOffset(prop,
+                                                         /*indirect*/ false,
+                                                         ForDefinition);
+
+          // We can't use emitClassFieldOffset() here because that creates
+          // an invariant load, which could be hoisted above the point
+          // where the metadata becomes fully initialized
+          Size offset = getClassFieldOffset(IGF.IGM, Target, prop);
+          int index = IGF.IGM.getOffsetInWords(offset);
+          auto offsetVal = emitLoadFromMetadataAtIndex(IGF, metadata, index,
+                                                       IGF.IGM.SizeTy);
+          IGF.Builder.CreateStore(offsetVal, offsetA);
+        }
+
+        index++;
+      }
     }
   };
 
   class ClassMetadataBuilder :
     public ClassMetadataBuilderBase<ClassMetadataBuilder> {
+
+    bool HasUnfilledSuperclass = false;
+    bool HasUnfilledParent = false;
   public:
     ClassMetadataBuilder(IRGenModule &IGM, ClassDecl *theClass,
                          const StructLayout &layout,
-                         const ClassLayout &fieldLayout)
-      : ClassMetadataBuilderBase(IGM, theClass, layout, fieldLayout) {
-
-      assert(layout.isFixedLayout() &&
-             "non-fixed layout classes require a template");
-      // FIXME: Distinguish Objective-C sliding from resilient layout
-      assert((fieldLayout.MetadataAccess == FieldAccess::ConstantDirect ||
-              fieldLayout.MetadataAccess == FieldAccess::NonConstantDirect) &&
-             "resilient superclasses require a template");
+                         const ClassLayout &fieldLayout,
+                         llvm::GlobalVariable *relativeAddressBase)
+      : ClassMetadataBuilderBase(IGM, theClass, layout, fieldLayout,
+                                 relativeAddressBase) {
     }
 
     llvm::Constant *getInit() {
@@ -3369,32 +3636,101 @@ namespace {
         = ArchetypeBuilder::mapTypeIntoContext(Target,
                                                Target->getSuperclass());
 
-      bool constantSuperclass =
-          addReferenceToType(superclassTy->getCanonicalType());
-      assert(constantSuperclass && "need template if superclass is dependent");
-      (void) constantSuperclass;
+      if (!addReferenceToHeapMetadata(superclassTy->getCanonicalType(),
+                                      /*allowUninit*/ false)) {
+        HasUnfilledSuperclass = true;
+      }
+    }
+
+    void addParentMetadataRef(ClassDecl *forClass, Type classType) {
+      CanType parentType = classType->getCanonicalType().getNominalParent();
+
+      if (auto metadata =
+            tryEmitConstantTypeMetadataRef(IGM, parentType,
+                                           SymbolReferenceKind::Absolute)) {
+        addWord(metadata.getValue());
+      } else {
+        // Leave a null pointer placeholder to be filled by in-place
+        // initialization.
+        addWord(llvm::ConstantPointerNull::get(IGM.TypeMetadataPtrTy));
+        if (forClass == Target)
+          HasUnfilledParent = true;
+      }
+    }
+
+    bool canBeConstant() {
+      // TODO: the metadata global can actually be constant in a very
+      // special case: it's not a pattern, ObjC interoperation isn't
+      // required, there are no class fields, and there is nothing that
+      // needs to be runtime-adjusted.
+      return false;
+    }
+
+    void createMetadataAccessFunction() {
+      assert(!Target->isGenericContext());
+      auto type =cast<ClassType>(Target->getDeclaredType()->getCanonicalType());
+
+      (void) getTypeMetadataAccessFunction(IGM, type, ForDefinition,
+      [&](IRGenFunction &IGF, llvm::Constant *cacheVar) -> llvm::Value* {
+        // There's an interesting special case where we can do the
+        // initialization idempotently and thus avoid the need for a lock.
+        if (!HasUnfilledSuperclass && !HasUnfilledParent &&
+            isFinishInitializationIdempotent()) {
+          auto type = Target->getDeclaredType()->getCanonicalType();
+          auto metadata =
+            IGF.IGM.getAddrOfTypeMetadata(type, /*pattern*/ false);
+          return emitFinishIdempotentInitialization(IGF, metadata);
+        }
+
+        // Otherwise, use the generic path.
+        return emitInPlaceTypeMetadataAccessFunctionBody(IGF, type, cacheVar,
+          [&](IRGenFunction &IGF, llvm::Value *metadata) {
+            return emitInPlaceMetadataInitialization(IGF, type, metadata);
+          });
+      });
+    }
+
+  private:
+    llvm::Value *emitInPlaceMetadataInitialization(IRGenFunction &IGF,
+                                                   CanClassType type,
+                                                   llvm::Value *metadata) {
+      // Many of the things done by generic instantiation are unnecessary here:
+      //   initializing the metaclass pointer
+      //   initializing the ro-data pointer
+
+      // Initialize the superclass if we didn't do so as a constant.
+      if (HasUnfilledSuperclass) {
+        auto superclass = type->getSuperclass(nullptr)->getCanonicalType();
+        llvm::Value *superclassMetadata =
+          emitClassHeapMetadataRef(IGF, superclass,
+                                   MetadataValueType::TypeMetadata,
+                                   /*allowUninit*/ false);
+        Address superField =
+          emitAddressOfSuperclassRefInClassMetadata(IGF, metadata);
+        superField = IGF.Builder.CreateElementBitCast(superField,
+                                                     IGF.IGM.TypeMetadataPtrTy);
+        IGF.Builder.CreateStore(superclassMetadata, superField);
+      }
+
+      // Initialize the class's own parent pointer if it has one and it
+      // wasn't emitted as a constant.
+      if (HasUnfilledParent) {
+        auto parentType = type.getParent();
+        assert(parentType);
+        llvm::Value *parentMetadata = IGF.emitTypeMetadataRef(parentType);
+
+        int index = getClassParentIndex(IGF.IGM, Target);
+        Address slot = emitAddressOfMetadataSlotAtIndex(IGF, metadata, index,
+                                                    IGF.IGM.TypeMetadataPtrTy);
+        IGF.Builder.CreateStore(parentMetadata, slot);
+      }
+
+      metadata = emitFinishInitializationOfClassMetadata(IGF, metadata);
+
+      return metadata;
     }
   };
   
-  Address emitAddressOfFieldOffsetVectorInClassMetadata(IRGenFunction &IGF,
-                                                        ClassDecl *theClass,
-                                                        llvm::Value *metadata) {
-    BEGIN_METADATA_SEARCHER_0(GetOffsetToFieldOffsetVector, Class)
-      void noteStartOfFieldOffsets(ClassDecl *whichClass) {
-        if (whichClass == Target)
-          setTargetOffset();
-      }
-    END_METADATA_SEARCHER()
-
-    auto offset =
-      GetOffsetToFieldOffsetVector(IGF.IGM, theClass).getTargetOffset();
-    
-    Address addr(metadata, IGF.IGM.getPointerAlignment());
-    addr = IGF.Builder.CreateBitCast(addr,
-                                     IGF.IGM.SizeTy->getPointerTo());
-    return createPointerSizedGEP(IGF, addr, offset);
-  }
-
   /// A builder for metadata templates.
   class GenericClassMetadataBuilder :
     public GenericMetadataBuilderBase<GenericClassMetadataBuilder,
@@ -3411,12 +3747,19 @@ namespace {
   public:
     GenericClassMetadataBuilder(IRGenModule &IGM, ClassDecl *theClass,
                                 const StructLayout &layout,
-                                const ClassLayout &fieldLayout)
-      : super(IGM, theClass, layout, fieldLayout)
+                                const ClassLayout &fieldLayout,
+                                llvm::GlobalVariable *relativeAddressBase)
+      : super(IGM, theClass, layout, fieldLayout, relativeAddressBase)
     {
       // We need special initialization of metadata objects to trick the ObjC
       // runtime into initializing them.
       HasDependentMetadata = true;
+    }
+
+    void addParentMetadataRef(ClassDecl *forClass, Type classType) {
+      CanType parentType = classType->getCanonicalType().getNominalParent();
+      this->addFillOp(parentType, None, /*relative*/ false);
+      addWord(llvm::ConstantPointerNull::get(IGM.TypeMetadataPtrTy));
     }
 
     void addSuperClass() {
@@ -3508,7 +3851,7 @@ namespace {
     // fill ops for generic arguments unless they belong directly to the target
     // class and not its ancestors.
 
-    void addGenericArgument(ArchetypeType *type, ClassDecl *forClass) {
+    void addGenericArgument(CanType type, ClassDecl *forClass) {
       if (forClass == Target) {
         // Introduce the fill op.
         GenericMetadataBuilderBase::addGenericArgument(type, forClass);
@@ -3520,46 +3863,16 @@ namespace {
       }
     }
     
-    void addGenericWitnessTable(ArchetypeType *type, ProtocolDecl *protocol,
+    void addGenericWitnessTable(CanType type, ProtocolConformanceRef conf,
                                 ClassDecl *forClass) {
       if (forClass == Target) {
         // Introduce the fill op.
-        GenericMetadataBuilderBase::addGenericWitnessTable(type, protocol,
-                                                           forClass);
+        GenericMetadataBuilderBase::addGenericWitnessTable(type, conf,forClass);
       } else {
         // Lay out the field, but don't provide the fill op, which we'll get
         // from the superclass.
         HasDependentMetadata = true;
-        ClassMetadataBuilderBase::addGenericWitnessTable(type, protocol,
-                                                         forClass);
-      }
-    }
-
-    // The Objective-C runtime will copy field offsets from the field offset
-    // vector into field offset globals for us, if present. If there's no
-    // Objective-C runtime, we have to do this ourselves.
-    void emitInitializeFieldOffsets(IRGenFunction &IGF,
-                                    llvm::Value *metadata) {
-      unsigned index = FieldLayout.InheritedStoredProperties.size();
-
-      for (auto prop : Target->getStoredProperties()) {
-        auto access = FieldLayout.AllFieldAccesses[index];
-        if (access == FieldAccess::NonConstantDirect) {
-          Address offsetA = IGF.IGM.getAddrOfFieldOffset(prop,
-                                                         /*indirect*/ false,
-                                                         ForDefinition);
-
-          // We can't use emitClassFieldOffset() here because that creates
-          // an invariant load, which could be hoisted above the point
-          // where the metadata becomes fully initialized
-          Size offset = getClassFieldOffset(IGF.IGM, Target, prop);
-          int index = getOffsetInWords(IGF.IGM, offset);
-          auto offsetVal = emitLoadFromMetadataAtIndex(IGF, metadata, index,
-                                                       IGF.IGM.SizeTy);
-          IGF.Builder.CreateStore(offsetVal, offsetA);
-        }
-
-        index++;
+        ClassMetadataBuilderBase::addGenericWitnessTable(type, conf, forClass);
       }
     }
 
@@ -3649,86 +3962,10 @@ namespace {
                             metaclassRODataPtr.getAddress(), IGF.IGM.IntPtrTy);
         IGF.Builder.CreateStore(rodata, rodataPtrSlot);
       }
-      
-      // If we have fields that are not fixed-size, ask the runtime to
-      // populate the offset vector.
-      //
-      // FIXME: if only the superclass is resilient, we can get away
-      // with sliding field offsets instead of doing the entire layout all
-      // over again.
-      if (!Layout.isFixedLayout()) {
-        llvm::Value *fieldVector
-          = emitAddressOfFieldOffsetVectorInClassMetadata(IGF,
-                                                          Target, metadata)
-              .getAddress();
-        
-        // Collect the stored properties of the type.
-        llvm::SmallVector<VarDecl*, 4> storedProperties;
-        for (auto prop : Target->getStoredProperties()) {
-          storedProperties.push_back(prop);
-        }
 
-        // Fill out an array with the field type metadata records.
-        Address fields = IGF.createAlloca(
-                         llvm::ArrayType::get(IGF.IGM.SizeTy,
-                                              storedProperties.size() * 2),
-                         IGF.IGM.getPointerAlignment(), "classFields");
-        IGF.Builder.CreateLifetimeStart(fields,
-                        IGF.IGM.getPointerSize() * storedProperties.size() * 2);
-        
-        Address firstField;
-        unsigned index = 0;
-        for (auto prop : storedProperties) {
-          auto propFormalTy = prop->getType()->getCanonicalType();
-          SILType propLoweredTy = IGM.SILMod->Types.getLoweredType(propFormalTy);
-          auto &propTI = IGF.getTypeInfo(propLoweredTy);
-          auto sizeAndAlignMask
-            = propTI.getSizeAndAlignmentMask(IGF, propLoweredTy);
-
-          llvm::Value *size = sizeAndAlignMask.first;
-          Address sizeAddr =
-            IGF.Builder.CreateStructGEP(fields, index, IGF.IGM.getPointerSize());
-          IGF.Builder.CreateStore(size, sizeAddr);
-          if (index == 0) firstField = sizeAddr;
-
-          llvm::Value *alignMask = sizeAndAlignMask.second;
-          Address alignMaskAddr =
-            IGF.Builder.CreateStructGEP(fields, index + 1,
-                                        IGF.IGM.getPointerSize());
-          IGF.Builder.CreateStore(alignMask, alignMaskAddr);
-
-          index += 2;
-        }
-
-        if (storedProperties.empty()) {
-          firstField = IGF.Builder.CreateStructGEP(fields, 0, Size(0));
-        }
-
-        // Ask the runtime to lay out the class.
-        auto numFields = IGF.IGM.getSize(Size(storedProperties.size()));
-        IGF.Builder.CreateCall(IGF.IGM.getInitClassMetadataUniversalFn(),
-                               {metadata, numFields,
-                                firstField.getAddress(), fieldVector});
-        IGF.Builder.CreateLifetimeEnd(fields,
-                        IGF.IGM.getPointerSize() * storedProperties.size() * 2);
-
-      } else {
-        // If we have any ancestor generic parameters or field offset vectors,
-        // copy them from the superclass metadata.
-        auto initFn = IGF.IGM.getInitializeSuperclassFn();
-
-        bool copyFieldOffsetVectors = false;
-        if (FieldLayout.MetadataAccess != FieldAccess::ConstantDirect)
-          copyFieldOffsetVectors = true;
-
-        IGF.Builder.CreateCall(initFn,
-                               {metadata,
-                                llvm::ConstantInt::get(IGF.IGM.Int1Ty,
-                                                       copyFieldOffsetVectors)});
-      }
-
-      if (!IGF.IGM.ObjCInterop)
-        emitInitializeFieldOffsets(IGF, metadata);
+      // We can assume that this never relocates the metadata because
+      // it should have been allocated properly for the class.
+      (void) emitFinishInitializationOfClassMetadata(IGF, metadata);
     }
   };
 }
@@ -3746,10 +3983,13 @@ static void emitObjCClassSymbol(IRGenModule &IGM,
   auto *metadataTy = cast<llvm::PointerType>(metadata->getType());
 
   // Create the alias.
-  llvm::GlobalAlias::create(metadataTy->getElementType(),
-                            metadataTy->getAddressSpace(),
-                            metadata->getLinkage(), classSymbol.str(),
-                            metadata, IGM.getModule());
+  auto *alias = llvm::GlobalAlias::create(metadataTy->getElementType(),
+                                          metadataTy->getAddressSpace(),
+                                          metadata->getLinkage(),
+                                          classSymbol.str(), metadata,
+                                          IGM.getModule());
+  if (IGM.TargetInfo.OutputObjectFormat == llvm::Triple::COFF)
+    alias->setDLLStorageClass(metadata->getDLLStorageClass());
 }
 
 /// Emit the type metadata or metadata template for a class.
@@ -3758,22 +3998,33 @@ void irgen::emitClassMetadata(IRGenModule &IGM, ClassDecl *classDecl,
                               const ClassLayout &fieldLayout) {
   assert(!classDecl->isForeign());
 
+  // Set up a dummy global to stand in for the metadata object while we produce
+  // relative references.
+  auto tempBase = createTemporaryRelativeAddressBase(IGM);
+
   // TODO: classes nested within generic types
   llvm::Constant *init;
   bool isPattern;
-  if (IGM.hasMetadataPattern(classDecl)) {
-    GenericClassMetadataBuilder builder(IGM, classDecl, layout, fieldLayout);
+  bool canBeConstant;
+  if (classDecl->isGenericContext()) {
+    GenericClassMetadataBuilder builder(IGM, classDecl, layout, fieldLayout,
+                                        tempBase.get());
     builder.layout();
     init = builder.getInit();
     isPattern = true;
+    canBeConstant = false;
+
+    maybeEmitNominalTypeMetadataAccessFunction(IGM, classDecl, builder);
   } else {
-    ClassMetadataBuilder builder(IGM, classDecl, layout, fieldLayout);
+    ClassMetadataBuilder builder(IGM, classDecl, layout, fieldLayout,
+                                 tempBase.get());
     builder.layout();
     init = builder.getInit();
     isPattern = false;
-  }
+    canBeConstant = builder.canBeConstant();
 
-  maybeEmitTypeMetadataAccessFunction(IGM, classDecl);
+    maybeEmitNominalTypeMetadataAccessFunction(IGM, classDecl, builder);
+  }
 
   CanType declaredType = classDecl->getDeclaredType()->getCanonicalType();
 
@@ -3785,14 +4036,12 @@ void irgen::emitClassMetadata(IRGenModule &IGM, ClassDecl *classDecl,
     section = "__DATA,__objc_data, regular";
 
   auto var = IGM.defineTypeMetadata(declaredType, isIndirect, isPattern,
-               // TODO: the metadata global can actually be constant in a very
-               // special case: it's not a pattern, ObjC interoperation isn't
-               // required, there are no class fields, and there is nothing that
-               // needs to be runtime-adjusted.
-               /*isConstant*/ false, init, section);
+               canBeConstant, init, std::move(tempBase), section);
 
-  // Add non-generic classes to the ObjC class list.
-  if (IGM.ObjCInterop && !isPattern && !isIndirect) {
+  // Add classes that don't require dynamic initialization to the
+  // ObjC class list.
+  if (IGM.ObjCInterop && !isPattern && !isIndirect &&
+      !doesClassMetadataRequireDynamicInitialization(IGM, classDecl)) {
     // Emit the ObjC class symbol to make the class visible to ObjC.
     if (classDecl->isObjC()) {
       emitObjCClassSymbol(IGM, classDecl, var);
@@ -3813,36 +4062,6 @@ void IRGenFunction::setDereferenceableLoad(llvm::LoadInst *load,
   auto sizeNode = llvm::MDNode::get(IGM.LLVMContext,
                                   llvm::ConstantAsMetadata::get(sizeConstant));
   load->setMetadata(IGM.DereferenceableID, sizeNode);
-}
-
-/// Emit a load from the given metadata at a constant index.
-static llvm::LoadInst *emitLoadFromMetadataAtIndex(IRGenFunction &IGF,
-                                                   llvm::Value *metadata,
-                                                   int index,
-                                                   llvm::Type *objectTy,
-                                                   const llvm::Twine &suffix) {
-  // Require the metadata to be some type that we recognize as a
-  // metadata pointer.
-  assert(metadata->getType() == IGF.IGM.TypeMetadataPtrTy);
-
-  // We require objectType to be a pointer type so that the GEP will
-  // scale by the right amount.  We could load an arbitrary type using
-  // some extra bitcasting.
-  assert(IGF.IGM.DataLayout.getTypeStoreSize(objectTy) ==
-         IGF.IGM.DataLayout.getTypeStoreSize(IGF.IGM.SizeTy));
-
-  // Cast to T*.
-  auto objectPtrTy = objectTy->getPointerTo();
-  auto metadataWords = IGF.Builder.CreateBitCast(metadata, objectPtrTy);
-
-  auto indexV = llvm::ConstantInt::getSigned(IGF.IGM.SizeTy, index);
-
-  // GEP to the slot.
-  Address slot(IGF.Builder.CreateInBoundsGEP(metadataWords, indexV),
-               IGF.IGM.getPointerAlignment());
-
-  // Load.
-  return IGF.Builder.CreateLoad(slot, metadata->getName() + suffix);
 }
 
 /// Emit a load from the given metadata at a constant index.
@@ -3932,12 +4151,21 @@ static llvm::Value *emitLoadOfWitnessTableRefAtIndex(IRGenFunction &IGF,
 namespace {
   /// A class for finding the 'parent' index in a class metadata object.
   BEGIN_METADATA_SEARCHER_0(FindClassParentIndex, Class)
-    void addParentMetadataRef(ClassDecl *forClass) {
+    void addParentMetadataRef(ClassDecl *forClass, Type classType) {
       if (forClass == Target) setTargetOffset();
-      super::addParentMetadataRef(forClass);
+      super::addParentMetadataRef(forClass, classType);
     }
   END_METADATA_SEARCHER()
 }
+
+/// Return the index of the parent metadata pointer for the given class.
+static int getClassParentIndex(IRGenModule &IGM, ClassDecl *classDecl) {
+  assert(classDecl->getDeclContext()->isTypeContext());
+  return FindClassParentIndex(IGM, classDecl).getTargetIndex();
+}
+
+/// In both enums and structs, the parent index is at index 2.
+static constexpr int ValueTypeParentIndex = 2;
 
 /// Given a reference to some metadata, derive a reference to the
 /// type's parent type.
@@ -3957,30 +4185,66 @@ llvm::Value *irgen::emitParentMetadataRef(IRGenFunction &IGF,
     llvm_unreachable("protocols never have parent types!");
 
   case DeclKind::Class: {
-    int index =
-      FindClassParentIndex(IGF.IGM, cast<ClassDecl>(decl)).getTargetIndex();
+    int index = getClassParentIndex(IGF.IGM, cast<ClassDecl>(decl));
     return emitLoadOfMetadataRefAtIndex(IGF, metadata, index);
   }
 
   case DeclKind::Enum:
   case DeclKind::Struct:
-    // In both of these cases, 'Parent' is always the third field.
-    return emitLoadOfMetadataRefAtIndex(IGF, metadata, 2);
+    return emitLoadOfMetadataRefAtIndex(IGF, metadata, ValueTypeParentIndex);
   }
   llvm_unreachable("bad decl kind!");
 }
 
 namespace {
-  /// A class for finding a type argument in a type metadata object.
-  BEGIN_GENERIC_METADATA_SEARCHER_1(FindTypeArgumentIndex,
-                                    ArchetypeType *, TargetArchetype)
+  /// A class for finding the start of the generic requirements section
+  /// in a type metadata object.
+  BEGIN_GENERIC_METADATA_SEARCHER_0(FindTypeGenericRequirements)
     template <class... T>
-    void addGenericArgument(ArchetypeType *argument, T &&...args) {
-      if (argument == TargetArchetype)
-        this->setTargetOffset();
-      super::addGenericArgument(argument, std::forward<T>(args)...);
+    void noteStartOfGenericRequirements() {
+      this->setTargetOffset();
     }
-  END_GENERIC_METADATA_SEARCHER(ArgumentIndex)
+
+    template <class... T>
+    void noteStartOfGenericRequirements(ClassDecl *forClass) {
+      if (forClass == Target)
+        this->setTargetOffset();
+    }
+  END_GENERIC_METADATA_SEARCHER(GenericRequirements)
+}
+
+static int getIndexOfGenericRequirement(IRGenModule &IGM,
+                                        NominalTypeDecl *decl,
+                                        unsigned reqtIndex) {
+  switch (decl->getKind()) {
+#define NOMINAL_TYPE_DECL(id, parent)
+#define DECL(id, parent) \
+  case DeclKind::id:
+#include "swift/AST/DeclNodes.def"
+    llvm_unreachable("not a nominal type");
+
+  case DeclKind::Protocol:
+    llvm_unreachable("protocols are never generic!");
+
+  case DeclKind::Class: {
+    int index = FindClassGenericRequirements(IGM, cast<ClassDecl>(decl))
+                  .getTargetIndex() + (int) reqtIndex;
+    return index;
+  }
+
+  case DeclKind::Enum: {
+    int index = FindEnumGenericRequirements(IGM, cast<EnumDecl>(decl))
+                  .getTargetIndex() + (int) reqtIndex;
+    return index;
+  }
+        
+  case DeclKind::Struct: {
+    int index = FindStructGenericRequirements(IGM, cast<StructDecl>(decl))
+                  .getTargetIndex() + (int) reqtIndex;
+    return index;
+  }
+  }
+  llvm_unreachable("bad decl kind!");
 }
 
 /// Given a reference to nominal type metadata of the given type,
@@ -3988,62 +4252,12 @@ namespace {
 /// have generic arguments.
 llvm::Value *irgen::emitArgumentMetadataRef(IRGenFunction &IGF,
                                             NominalTypeDecl *decl,
-                                            unsigned argumentIndex,
+                                      const GenericTypeRequirements &reqts,
+                                            unsigned reqtIndex,
                                             llvm::Value *metadata) {
-  assert(decl->getGenericParams() != nullptr);
-  auto targetArchetype =
-    decl->getGenericParams()->getAllArchetypes()[argumentIndex];
-
-  switch (decl->getKind()) {
-#define NOMINAL_TYPE_DECL(id, parent)
-#define DECL(id, parent) \
-  case DeclKind::id:
-#include "swift/AST/DeclNodes.def"
-    llvm_unreachable("not a nominal type");
-
-  case DeclKind::Protocol:
-    llvm_unreachable("protocols are never generic!");
-
-  case DeclKind::Class: {
-    int index =
-      FindClassArgumentIndex(IGF.IGM, cast<ClassDecl>(decl), targetArchetype)
-        .getTargetIndex();
-    return emitLoadOfMetadataRefAtIndex(IGF, metadata, index);
-  }
-
-  case DeclKind::Struct: {
-    int index =
-      FindStructArgumentIndex(IGF.IGM, cast<StructDecl>(decl), targetArchetype)
-        .getTargetIndex();
-    return emitLoadOfMetadataRefAtIndex(IGF, metadata, index);
-  }
-
-  case DeclKind::Enum: {
-    int index =
-      FindEnumArgumentIndex(IGF.IGM, cast<EnumDecl>(decl), targetArchetype)
-        .getTargetIndex();
-    return emitLoadOfMetadataRefAtIndex(IGF, metadata, index);
-  }
-  }
-  llvm_unreachable("bad decl kind!");
-}
-
-namespace {
-  /// A class for finding a protocol witness table for a type argument
-  /// in a value type metadata object.
-  BEGIN_GENERIC_METADATA_SEARCHER_2(FindTypeWitnessTableIndex,
-                                    ArchetypeType *, TargetArchetype,
-                                    ProtocolDecl *, TargetProtocol)
-    template <class... T>
-    void addGenericWitnessTable(ArchetypeType *argument,
-                                ProtocolDecl *protocol,
-                                T &&...args) {
-      if (argument == TargetArchetype && protocol == TargetProtocol)
-        this->setTargetOffset();
-      super::addGenericWitnessTable(argument, protocol,
-                                    std::forward<T>(args)...);
-    }
-  END_GENERIC_METADATA_SEARCHER(WitnessTableIndex)
+  assert(reqts.getRequirements()[reqtIndex].Protocol == nullptr);
+  int index = getIndexOfGenericRequirement(IGF.IGM, decl, reqtIndex);
+  return emitLoadOfMetadataRefAtIndex(IGF, metadata, index);
 }
 
 /// Given a reference to nominal type metadata of the given type,
@@ -4051,48 +4265,12 @@ namespace {
 /// argument metadata.  The type must have generic arguments.
 llvm::Value *irgen::emitArgumentWitnessTableRef(IRGenFunction &IGF,
                                                 NominalTypeDecl *decl,
-                                                unsigned argumentIndex,
-                                                ProtocolDecl *targetProtocol,
+                                          const GenericTypeRequirements &reqts,
+                                                unsigned reqtIndex,
                                                 llvm::Value *metadata) {
-  assert(decl->getGenericParams() != nullptr);
-  auto targetArchetype =
-    decl->getGenericParams()->getAllArchetypes()[argumentIndex];
-
-  switch (decl->getKind()) {
-#define NOMINAL_TYPE_DECL(id, parent)
-#define DECL(id, parent) \
-  case DeclKind::id:
-#include "swift/AST/DeclNodes.def"
-    llvm_unreachable("not a nominal type");
-
-  case DeclKind::Protocol:
-    llvm_unreachable("protocols are never generic!");
-
-  case DeclKind::Class: {
-    int index =
-      FindClassWitnessTableIndex(IGF.IGM, cast<ClassDecl>(decl),
-                                 targetArchetype, targetProtocol)
-        .getTargetIndex();
-    return emitLoadOfWitnessTableRefAtIndex(IGF, metadata, index);
-  }
-
-  case DeclKind::Enum: {
-    int index =
-      FindEnumWitnessTableIndex(IGF.IGM, cast<EnumDecl>(decl),
-                                 targetArchetype, targetProtocol)
-        .getTargetIndex();
-    return emitLoadOfWitnessTableRefAtIndex(IGF, metadata, index);
-  }
-      
-  case DeclKind::Struct: {
-    int index =
-      FindStructWitnessTableIndex(IGF.IGM, cast<StructDecl>(decl),
-                                  targetArchetype, targetProtocol)
-        .getTargetIndex();
-    return emitLoadOfWitnessTableRefAtIndex(IGF, metadata, index);
-  }
-  }
-  llvm_unreachable("bad decl kind!");
+  assert(reqts.getRequirements()[reqtIndex].Protocol != nullptr);
+  int index = getIndexOfGenericRequirement(IGF.IGM, decl, reqtIndex);
+  return emitLoadOfWitnessTableRefAtIndex(IGF, metadata, index);
 }
 
 irgen::Size irgen::getClassFieldOffset(IRGenModule &IGM,
@@ -4119,7 +4297,7 @@ llvm::Value *irgen::emitClassFieldOffset(IRGenFunction &IGF,
                                          VarDecl *field,
                                          llvm::Value *metadata) {
   irgen::Size offset = getClassFieldOffset(IGF.IGM, theClass, field);
-  int index = getOffsetInWords(IGF.IGM, offset);
+  int index = IGF.IGM.getOffsetInWords(offset);
   return emitInvariantLoadFromMetadataAtIndex(IGF, metadata, index,
                                               IGF.IGM.SizeTy);
 }
@@ -4182,16 +4360,20 @@ irgen::emitClassResilientInstanceSizeAndAlignMask(IRGenFunction &IGF,
          && "didn't find size or alignment in metadata?!");
   Address metadataAsBytes(IGF.Builder.CreateBitCast(metadata, IGF.IGM.Int8PtrTy),
                           IGF.IGM.getPointerAlignment());
-  auto loadZExtInt32AtOffset = [&](Size offset) {
-    Address slot = IGF.Builder.CreateConstByteArrayGEP(metadataAsBytes, offset);
-    slot = IGF.Builder.CreateBitCast(slot, IGF.IGM.Int32Ty->getPointerTo());
-    llvm::Value *result = IGF.Builder.CreateLoad(slot);
-    if (IGF.IGM.SizeTy != IGF.IGM.Int32Ty)
-      result = IGF.Builder.CreateZExt(result, IGF.IGM.SizeTy);
-    return result;
-  };
-  llvm::Value *size = loadZExtInt32AtOffset(scanner.InstanceSize);
-  llvm::Value *alignMask = loadZExtInt32AtOffset(scanner.InstanceAlignMask);
+
+  Address slot = IGF.Builder.CreateConstByteArrayGEP(metadataAsBytes,
+                                                     scanner.InstanceSize);
+  slot = IGF.Builder.CreateBitCast(slot, IGF.IGM.Int32Ty->getPointerTo());
+  llvm::Value *size = IGF.Builder.CreateLoad(slot);
+  if (IGF.IGM.SizeTy != IGF.IGM.Int32Ty)
+    size = IGF.Builder.CreateZExt(size, IGF.IGM.SizeTy);
+
+  slot = IGF.Builder.CreateConstByteArrayGEP(metadataAsBytes,
+                                             scanner.InstanceAlignMask);
+  slot = IGF.Builder.CreateBitCast(slot, IGF.IGM.Int16Ty->getPointerTo());
+  llvm::Value *alignMask = IGF.Builder.CreateLoad(slot);
+  alignMask = IGF.Builder.CreateZExt(alignMask, IGF.IGM.SizeTy);
+
   return {size, alignMask};
 }
 
@@ -4207,6 +4389,8 @@ static llvm::Value *emitLoadOfObjCHeapMetadataRef(IRGenFunction &IGF,
     metadata = IGF.Builder.CreateAnd(metadata, mask);
     metadata = IGF.Builder.CreateIntToPtr(metadata, IGF.IGM.TypeMetadataPtrTy);
     return metadata;
+  } else if (IGF.IGM.TargetInfo.hasOpaqueISAs()) {
+    return emitHeapMetadataRefForUnknownHeapObject(IGF, object);
   } else {
     object = IGF.Builder.CreateBitCast(object,
                                   IGF.IGM.TypeMetadataPtrTy->getPointerTo());
@@ -4310,7 +4494,6 @@ llvm::Value *irgen::emitDynamicTypeOfOpaqueHeapObject(IRGenFunction &IGF,
   auto metadata = IGF.Builder.CreateCall(IGF.IGM.getGetObjectTypeFn(),
                                          object,
                                          object->getName() + ".Type");
-  metadata->setCallingConv(IGF.IGM.RuntimeCC);
   metadata->setDoesNotThrow();
   metadata->setDoesNotAccessMemory();
   return metadata;
@@ -4413,17 +4596,6 @@ namespace {
   END_METADATA_SEARCHER()
 }
 
-/// Provide the abstract parameters for virtual calls to the given method.
-AbstractCallee irgen::getAbstractVirtualCallee(IRGenFunction &IGF,
-                                               FuncDecl *method) {
-  // TODO: maybe use better versions in the v-table sometimes?
-  ResilienceExpansion bestExplosion = ResilienceExpansion::Minimal;
-  unsigned naturalUncurry = method->getNaturalArgumentCount() - 1;
-
-  return AbstractCallee(SILFunctionTypeRepresentation::Method, bestExplosion,
-                        naturalUncurry, naturalUncurry, ExtraData::None);
-}
-
 /// Load the correct virtual function for the given class method.
 llvm::Value *irgen::emitVirtualMethodValue(IRGenFunction &IGF,
                                            llvm::Value *base,
@@ -4486,6 +4658,108 @@ llvm::Value *irgen::emitVirtualMethodValue(IRGenFunction &IGF,
 }
 
 //===----------------------------------------------------------------------===//
+// Value types (structs and enums)
+//===----------------------------------------------------------------------===//
+
+namespace {
+  template <class Impl, class Base>
+    class ValueTypeMetadataBuilderBase : public ConstantBuilder<Base> {
+    using super = ConstantBuilder<Base>;
+
+  protected:
+    using super::asImpl;
+    using super::IGM;
+    using super::Target;
+    using super::addWord;
+
+    template <class DeclTy>
+    ValueTypeMetadataBuilderBase(IRGenModule &IGM, DeclTy *theDecl)
+      : super(IGM, theDecl) {}
+
+    CanType getParentType() const {
+      Type parentType =
+        Target->getDeclContext()->getDeclaredTypeInContext();
+      return (parentType ? parentType->getCanonicalType() : CanType());
+    }
+
+  public:
+    void addParentMetadataRef() {
+      llvm::Constant *parentMetadata = nullptr;
+      if (auto parentType = getParentType()) {
+        parentMetadata =
+          tryEmitConstantTypeMetadataRef(IGM, parentType,
+                                         SymbolReferenceKind::Absolute)
+            .getDirectValue();
+        if (!parentMetadata) {
+          asImpl().flagUnfilledParent();
+        }
+      }
+
+      if (!parentMetadata)
+        parentMetadata = llvm::ConstantPointerNull::get(IGM.TypeMetadataPtrTy);
+      addWord(parentMetadata);
+    }
+  };
+}
+
+static llvm::Value *
+emitInPlaceValueTypeMetadataInitialization(IRGenFunction &IGF,
+                                           CanNominalType type,
+                                           llvm::Value *metadata,
+                                           bool hasUnfilledParent) {
+  // All the value types are basically similar.
+  assert(isa<StructType>(type) || isa<EnumType>(type));
+
+  // Initialize the parent-metadata field if it wasn't done statically.
+  if (hasUnfilledParent) {
+    CanType parentType = type.getParent();
+    assert(parentType);
+
+    // Value types hold the parent metadata as a far relative
+    // indirectable pointer.
+    llvm::Value *parentMetadata = IGF.emitTypeMetadataRef(parentType);
+    Address addr =
+      emitAddressOfMetadataSlotAtIndex(IGF, metadata, ValueTypeParentIndex,
+                                       IGF.IGM.TypeMetadataPtrTy);
+    IGF.Builder.CreateStore(parentMetadata, addr);
+  }
+
+  // Set up the value witness table if it's dependent.
+  SILType loweredType = IGF.IGM.getLoweredType(AbstractionPattern(type), type);
+  auto &ti = IGF.IGM.getTypeInfo(loweredType);
+  if (!ti.isFixedSize()) {
+    // We assume that that value witness table will already have been written
+    // into the metadata; just load it.
+    llvm::Value *vwtable = IGF.emitValueWitnessTableRefForMetadata(metadata);
+
+    // Initialize the metadata.
+    ti.initializeMetadata(IGF, metadata, vwtable, loweredType.getAddressType());
+  }
+
+  return metadata;
+}
+
+/// Create an access function for the type metadata of the given
+/// non-generic nominal type.
+static void createInPlaceValueTypeMetadataAccessFunction(IRGenModule &IGM,
+                                                      NominalTypeDecl *typeDecl,
+                                                      bool hasUnfilledParent) {
+  assert(!typeDecl->isGenericContext());
+  auto type =
+    cast<NominalType>(typeDecl->getDeclaredType()->getCanonicalType());
+
+  (void) getTypeMetadataAccessFunction(IGM, type, ForDefinition,
+                                       [&](IRGenFunction &IGF,
+                                           llvm::Constant *cacheVariable) {
+    return emitInPlaceTypeMetadataAccessFunctionBody(IGF, type, cacheVariable,
+      [&](IRGenFunction &IGF, llvm::Value *metadata) {
+        return emitInPlaceValueTypeMetadataInitialization(IGF, type, metadata,
+                                                          hasUnfilledParent);
+      });
+  });
+}
+
+//===----------------------------------------------------------------------===//
 // Structs
 //===----------------------------------------------------------------------===//
 
@@ -4493,17 +4767,24 @@ namespace {
   /// An adapter for laying out struct metadata.
   template <class Impl>
   class StructMetadataBuilderBase
-         : public ConstantBuilder<StructMetadataLayout<Impl>> {
-    using super = ConstantBuilder<StructMetadataLayout<Impl>>;
+         : public ValueTypeMetadataBuilderBase<Impl,StructMetadataLayout<Impl>>{
+    using super = ValueTypeMetadataBuilderBase<Impl,StructMetadataLayout<Impl>>;
 
   protected:
     using super::IGM;
     using super::Target;
+    using super::asImpl;
     using super::addConstantWord;
     using super::addWord;
+    using super::addFarRelativeAddress;
+    using super::addFarRelativeAddressOrNull;
+    using super::setRelativeAddressBase;
 
-    StructMetadataBuilderBase(IRGenModule &IGM, StructDecl *theStruct)
-      : super(IGM, theStruct) {}
+    StructMetadataBuilderBase(IRGenModule &IGM, StructDecl *theStruct,
+                              llvm::GlobalVariable *relativeAddressBase)
+    : super(IGM, theStruct) {
+      setRelativeAddressBase(relativeAddressBase);
+    }
 
   public:
     void addMetadataFlags() {
@@ -4511,14 +4792,11 @@ namespace {
     }
 
     void addNominalTypeDescriptor() {
-      addWord(StructNominalTypeDescriptorBuilder(IGM, Target).emit());
+      llvm::Constant *descriptor =
+        StructNominalTypeDescriptorBuilder(IGM, Target).emit();
+      addFarRelativeAddress(descriptor);
     }
 
-    void addParentMetadataRef() {
-      // FIXME!
-      addWord(llvm::ConstantPointerNull::get(IGM.TypeMetadataPtrTy));
-    }
-    
     void addFieldOffset(VarDecl *var) {
       assert(var->hasStorage() &&
              "storing field offset for computed property?!");
@@ -4530,17 +4808,19 @@ namespace {
         emitPhysicalStructMemberFixedOffset(IGM, structType, var);
       // If we have a fixed offset, add it. Otherwise, leave zero as a
       // placeholder.
-      if (offset)
+      if (offset) {
         addWord(offset);
-      else
+      } else {
+        asImpl().flagUnfilledFieldOffset();
         addConstantWord(0);
+      }
     }
 
-    void addGenericArgument(ArchetypeType *type) {
+    void addGenericArgument(CanType type) {
       addWord(llvm::Constant::getNullValue(IGM.TypeMetadataPtrTy));
     }
 
-    void addGenericWitnessTable(ArchetypeType *type, ProtocolDecl *protocol) {
+    void addGenericWitnessTable(CanType type, ProtocolConformanceRef conf) {
       addWord(llvm::Constant::getNullValue(IGM.WitnessTablePtrTy));
     }
 
@@ -4552,13 +4832,34 @@ namespace {
 
   class StructMetadataBuilder :
     public StructMetadataBuilderBase<StructMetadataBuilder> {
+
+    bool HasUnfilledParent = false;
+    bool HasUnfilledFieldOffset = false;
   public:
-    StructMetadataBuilder(IRGenModule &IGM, StructDecl *theStruct)
-      : StructMetadataBuilderBase(IGM, theStruct) {}
+    StructMetadataBuilder(IRGenModule &IGM, StructDecl *theStruct,
+                          llvm::GlobalVariable *relativeAddressBase)
+      : StructMetadataBuilderBase(IGM, theStruct, relativeAddressBase) {}
+
+    void flagUnfilledParent() {
+      HasUnfilledParent = true;
+    }
+
+    void flagUnfilledFieldOffset() {
+      HasUnfilledFieldOffset = true;
+    }
+
+    bool canBeConstant() {
+      return !HasUnfilledParent && !HasUnfilledFieldOffset;
+    }
 
     void addValueWitnessTable() {
       auto type = this->Target->getDeclaredType()->getCanonicalType();
       addWord(emitValueWitnessTable(IGM, type));
+    }
+
+    void createMetadataAccessFunction() {
+      createInPlaceValueTypeMetadataAccessFunction(IGM, Target,
+                                                   HasUnfilledParent);
     }
   };
   
@@ -4587,8 +4888,9 @@ namespace {
     typedef GenericMetadataBuilderBase super;
                         
   public:
-    GenericStructMetadataBuilder(IRGenModule &IGM, StructDecl *theStruct)
-      : super(IGM, theStruct) {}
+    GenericStructMetadataBuilder(IRGenModule &IGM, StructDecl *theStruct,
+                                 llvm::GlobalVariable *relativeAddressBase)
+      : super(IGM, theStruct, relativeAddressBase) {}
 
     llvm::Value *emitAllocateMetadata(IRGenFunction &IGF,
                                       llvm::Value *metadataPattern,
@@ -4597,6 +4899,19 @@ namespace {
                                     {metadataPattern, arguments});
     }
 
+    void addParentMetadataRef() {
+      // Override to always use a fill op instead of a relocation.
+      if (CanType parentType = getParentType()) {
+        addFillOp(parentType, None, /*relative*/ false);
+      }
+
+      addConstantWord(0);
+    }
+
+    void flagUnfilledFieldOffset() {
+      // We just assume this might happen.
+    }
+    
     void addValueWitnessTable() {
       addWord(getValueWitnessTableForGenericValueType(IGM, Target,
                                                       HasDependentVWT));
@@ -4625,22 +4940,31 @@ namespace {
 
 /// Emit the type metadata or metadata template for a struct.
 void irgen::emitStructMetadata(IRGenModule &IGM, StructDecl *structDecl) {
+  // Set up a dummy global to stand in for the metadata object while we produce
+  // relative references.
+  auto tempBase = createTemporaryRelativeAddressBase(IGM);
+
   // TODO: structs nested within generic types
   llvm::Constant *init;
   bool isPattern;
-  if (IGM.hasMetadataPattern(structDecl)) {
-    GenericStructMetadataBuilder builder(IGM, structDecl);
+  bool canBeConstant;
+  if (structDecl->isGenericContext()) {
+    GenericStructMetadataBuilder builder(IGM, structDecl, tempBase.get());
     builder.layout();
     init = builder.getInit();
     isPattern = true;
+    canBeConstant = false;
+
+    maybeEmitNominalTypeMetadataAccessFunction(IGM, structDecl, builder);
   } else {
-    StructMetadataBuilder builder(IGM, structDecl);
+    StructMetadataBuilder builder(IGM, structDecl, tempBase.get());
     builder.layout();
     init = builder.getInit();
     isPattern = false;
-  }
+    canBeConstant = builder.canBeConstant();
 
-  maybeEmitTypeMetadataAccessFunction(IGM, structDecl);
+    maybeEmitNominalTypeMetadataAccessFunction(IGM, structDecl, builder);
+  }
 
   CanType declaredType = structDecl->getDeclaredType()->getCanonicalType();
 
@@ -4648,7 +4972,8 @@ void irgen::emitStructMetadata(IRGenModule &IGM, StructDecl *structDecl) {
   bool isIndirect = false;
 
   IGM.defineTypeMetadata(declaredType, isIndirect, isPattern,
-                         /*isConstant*/!isPattern, init);
+                         canBeConstant, init,
+                         std::move(tempBase));
 }
 
 // Enums
@@ -4657,17 +4982,23 @@ namespace {
 
 template<class Impl>
 class EnumMetadataBuilderBase
-       : public ConstantBuilder<EnumMetadataLayout<Impl>> {
-  using super = ConstantBuilder<EnumMetadataLayout<Impl>>;
+       : public ValueTypeMetadataBuilderBase<Impl, EnumMetadataLayout<Impl>> {
+  using super = ValueTypeMetadataBuilderBase<Impl, EnumMetadataLayout<Impl>>;
 
 protected:
   using super::IGM;
   using super::Target;
   using super::addWord;
+  using super::addFarRelativeAddress;
+  using super::addFarRelativeAddressOrNull;
+  using super::setRelativeAddressBase;
 
 public:
-  EnumMetadataBuilderBase(IRGenModule &IGM, EnumDecl *theEnum)
-    : super(IGM, theEnum) {}
+  EnumMetadataBuilderBase(IRGenModule &IGM, EnumDecl *theEnum,
+                          llvm::GlobalVariable *relativeAddressBase)
+  : super(IGM, theEnum) {
+    setRelativeAddressBase(relativeAddressBase);
+  }
   
   void addMetadataFlags() {
     addWord(getMetadataKind(IGM, Target->classifyAsOptionalType()
@@ -4675,30 +5006,30 @@ public:
   }
   
   void addNominalTypeDescriptor() {
-    // FIXME!
-    addWord(EnumNominalTypeDescriptorBuilder(IGM, Target).emit());
+    auto descriptor =
+      EnumNominalTypeDescriptorBuilder(IGM, Target).emit();
+    
+    addFarRelativeAddress(descriptor);
   }
-  
-  void addParentMetadataRef() {
-    // FIXME!
-    addWord(llvm::ConstantPointerNull::get(IGM.TypeMetadataPtrTy));
-  }
-  
-  void addGenericArgument(ArchetypeType *type) {
+
+  void addGenericArgument(CanType type) {
     addWord(llvm::Constant::getNullValue(IGM.TypeMetadataPtrTy));
   }
   
-  void addGenericWitnessTable(ArchetypeType *type, ProtocolDecl *protocol) {
+  void addGenericWitnessTable(CanType type, ProtocolConformanceRef conf) {
     addWord(llvm::Constant::getNullValue(IGM.WitnessTablePtrTy));
   }
 };
   
 class EnumMetadataBuilder
-  : public EnumMetadataBuilderBase<EnumMetadataBuilder>
-{
+  : public EnumMetadataBuilderBase<EnumMetadataBuilder> {
+  bool HasUnfilledParent = false;
+  bool HasUnfilledPayloadSize = false;
+
 public:
-  EnumMetadataBuilder(IRGenModule &IGM, EnumDecl *theEnum)
-    : EnumMetadataBuilderBase(IGM, theEnum) {}
+  EnumMetadataBuilder(IRGenModule &IGM, EnumDecl *theEnum,
+                      llvm::GlobalVariable *relativeAddressBase)
+    : EnumMetadataBuilderBase(IGM, theEnum, relativeAddressBase) {}
   
   void addValueWitnessTable() {
     auto type = Target->getDeclaredType()->getCanonicalType();
@@ -4708,14 +5039,29 @@ public:
   void addPayloadSize() {
     auto enumTy = Target->getDeclaredTypeInContext()->getCanonicalType();
     auto &enumTI = IGM.getTypeInfoForLowered(enumTy);
-    (void) enumTI;
-    assert(enumTI.isFixedSize(ResilienceExpansion::Maximal) &&
-           "emitting constant enum metadata for resilient-sized type?");
+    if (!enumTI.isFixedSize(ResilienceExpansion::Maximal)) {
+      addConstantWord(0);
+      HasUnfilledPayloadSize = true;
+      return;
+    }
+
     assert(!enumTI.isFixedSize(ResilienceExpansion::Minimal) &&
            "non-generic, non-resilient enums don't need payload size in metadata");
-
     auto &strategy = getEnumImplStrategy(IGM, enumTy);
     addConstantWord(strategy.getPayloadSizeForMetadata());
+  }
+
+  void flagUnfilledParent() {
+    HasUnfilledParent = true;
+  }
+
+  bool canBeConstant() {
+    return !HasUnfilledParent && !HasUnfilledPayloadSize;
+  }
+
+  void createMetadataAccessFunction() {
+    createInPlaceValueTypeMetadataAccessFunction(IGM, Target,
+                                                 HasUnfilledParent);
   }
 };
   
@@ -4724,14 +5070,24 @@ class GenericEnumMetadataBuilder
                         EnumMetadataBuilderBase<GenericEnumMetadataBuilder>>
 {
 public:
-  GenericEnumMetadataBuilder(IRGenModule &IGM, EnumDecl *theEnum)
-    : GenericMetadataBuilderBase(IGM, theEnum) {}
+  GenericEnumMetadataBuilder(IRGenModule &IGM, EnumDecl *theEnum,
+                             llvm::GlobalVariable *relativeAddressBase)
+    : GenericMetadataBuilderBase(IGM, theEnum, relativeAddressBase) {}
 
   llvm::Value *emitAllocateMetadata(IRGenFunction &IGF,
                                     llvm::Value *metadataPattern,
                                     llvm::Value *arguments) {
     return IGF.Builder.CreateCall(IGM.getAllocateGenericValueMetadataFn(),
                                   {metadataPattern, arguments});
+  }
+
+  void addParentMetadataRef() {
+    // Override to always use a fill op instead of a relocation.
+    if (CanType parentType = getParentType()) {
+      addFillOp(parentType, None, /*relative*/ false);
+    }
+
+    addConstantWord(0);
   }
   
   void addValueWitnessTable() {
@@ -4773,23 +5129,32 @@ public:
 }
 
 void irgen::emitEnumMetadata(IRGenModule &IGM, EnumDecl *theEnum) {
+  // Set up a dummy global to stand in for the metadata object while we produce
+  // relative references.
+  auto tempBase = createTemporaryRelativeAddressBase(IGM);
+
   // TODO: enums nested inside generic types
   llvm::Constant *init;
   
   bool isPattern;
-  if (IGM.hasMetadataPattern(theEnum)) {
-    GenericEnumMetadataBuilder builder(IGM, theEnum);
+  bool canBeConstant;
+  if (theEnum->isGenericContext()) {
+    GenericEnumMetadataBuilder builder(IGM, theEnum, tempBase.get());
     builder.layout();
     init = builder.getInit();
     isPattern = true;
+    canBeConstant = false;
+
+    maybeEmitNominalTypeMetadataAccessFunction(IGM, theEnum, builder);
   } else {
-    EnumMetadataBuilder builder(IGM, theEnum);
+    EnumMetadataBuilder builder(IGM, theEnum, tempBase.get());
     builder.layout();
     init = builder.getInit();
     isPattern = false;
-  }
+    canBeConstant = builder.canBeConstant();
 
-  maybeEmitTypeMetadataAccessFunction(IGM, theEnum);
+    maybeEmitNominalTypeMetadataAccessFunction(IGM, theEnum, builder);
+  }
 
   CanType declaredType = theEnum->getDeclaredType()->getCanonicalType();
 
@@ -4797,7 +5162,7 @@ void irgen::emitEnumMetadata(IRGenModule &IGM, EnumDecl *theEnum) {
   bool isIndirect = false;
   
   IGM.defineTypeMetadata(declaredType, isIndirect, isPattern,
-                         /*isConstant*/!isPattern, init);
+                         canBeConstant, init, std::move(tempBase));
 }
 
 llvm::Value *IRGenFunction::emitObjCSelectorRefLoad(StringRef selector) {
@@ -4808,7 +5173,7 @@ llvm::Value *IRGenFunction::emitObjCSelectorRefLoad(StringRef selector) {
   // When generating JIT'd code, we need to call sel_registerName() to force
   // the runtime to unique the selector. For non-JIT'd code, the linker will
   // do it for us.
-  if (IGM.Opts.UseJIT) {
+  if (IGM.IRGen.Opts.UseJIT) {
     loadSel = Builder.CreateCall(IGM.getObjCSelRegisterNameFn(), loadSel);
   }
 
@@ -4867,6 +5232,14 @@ namespace {
 
     Size AddressPoint = Size::invalid();
 
+    bool computeUnfilledParent() {
+      if (auto parentType = asImpl().getTargetType().getNominalParent()) {
+        return !tryEmitConstantTypeMetadataRef(IGM, parentType,
+                                               SymbolReferenceKind::Absolute);
+      }
+      return false;
+    }
+
   public:
     void layout() {
       if (asImpl().requiresInitializationFunction())
@@ -4893,7 +5266,29 @@ namespace {
     }
 
     void addInitializationFunction() {
-      asImpl().addWord(llvm::ConstantPointerNull::get(IGM.Int8PtrTy));
+      auto type = cast<NominalType>(asImpl().getTargetType());
+
+      auto fnTy = llvm::FunctionType::get(IGM.VoidTy, {IGM.TypeMetadataPtrTy},
+                                          /*variadic*/ false);
+      llvm::Function *fn = llvm::Function::Create(fnTy,
+                                           llvm::GlobalValue::PrivateLinkage,
+                                           Twine("initialize_metadata_")
+                                             + type->getDecl()->getName().str(),
+                                           &IGM.Module);
+      fn->setAttributes(IGM.constructInitialAttributes());
+      
+      // Set up the function.
+      IRGenFunction IGF(IGM, fn);
+      if (IGM.DebugInfo)
+        IGM.DebugInfo->emitArtificialFunction(IGF, fn);
+
+      // Emit the initialization.
+      llvm::Value *metadata = IGF.collectParameters().claimNext();
+      asImpl().emitInitialization(IGF, metadata);
+
+      IGF.Builder.CreateRetVoid();
+
+      asImpl().addWord(fn);
     }
 
     void noteAddressPoint() {
@@ -4910,6 +5305,11 @@ namespace {
   public:
     ForeignClassMetadataBuilder(IRGenModule &IGM, ClassDecl *target)
       : ForeignMetadataBuilderBase(IGM, target) {}
+
+    void emitInitialization(IRGenFunction &IGF, llvm::Value *metadata) {
+      // TODO: superclasses?
+      llvm_unreachable("no supported forms of initialization");
+    }
 
     // Visitor methods.
 
@@ -4942,20 +5342,44 @@ namespace {
     public ForeignMetadataBuilderBase<ForeignStructMetadataBuilder,
                       StructMetadataBuilderBase<ForeignStructMetadataBuilder>>
   {
+    bool HasUnfilledParent = false;
   public:
-    ForeignStructMetadataBuilder(IRGenModule &IGM, StructDecl *target)
-      : ForeignMetadataBuilderBase(IGM, target)
-    {}
+    ForeignStructMetadataBuilder(IRGenModule &IGM, StructDecl *target,
+                                 llvm::GlobalVariable *relativeAddressBase)
+      : ForeignMetadataBuilderBase(IGM, target, relativeAddressBase) {
+      HasUnfilledParent = computeUnfilledParent();
+    }
     
     CanType getTargetType() const {
       return Target->getDeclaredType()->getCanonicalType();
     }
+
     bool requiresInitializationFunction() const {
-      return false;
+      return HasUnfilledParent;
     }
+    void emitInitialization(IRGenFunction &IGF, llvm::Value *metadata) {
+      if (HasUnfilledParent) {
+        auto parentType = getTargetType().getNominalParent();
+        auto parentMetadata = IGF.emitTypeMetadataRef(parentType);
+
+        int index = ValueTypeParentIndex;
+        Address slot = emitAddressOfMetadataSlotAtIndex(IGF, metadata, index,
+                                                    IGF.IGM.TypeMetadataPtrTy);
+        IGF.Builder.CreateStore(parentMetadata, slot);
+      }
+    }
+
     void addValueWitnessTable() {
       auto type = this->Target->getDeclaredType()->getCanonicalType();
       addWord(emitValueWitnessTable(IGM, type));
+    }
+
+    void flagUnfilledParent() {
+      assert(HasUnfilledParent);
+    }
+
+    void flagUnfilledFieldOffset() {
+      llvm_unreachable("foreign type with non-fixed layout?");
     }
   };
   
@@ -4964,17 +5388,33 @@ namespace {
     public ForeignMetadataBuilderBase<ForeignEnumMetadataBuilder,
                       EnumMetadataBuilderBase<ForeignEnumMetadataBuilder>>
   {
+    bool HasUnfilledParent = false;
   public:
-    ForeignEnumMetadataBuilder(IRGenModule &IGM, EnumDecl *target)
-      : ForeignMetadataBuilderBase(IGM, target)
-    {}
+    ForeignEnumMetadataBuilder(IRGenModule &IGM, EnumDecl *target,
+                               llvm::GlobalVariable *relativeAddressBase)
+      : ForeignMetadataBuilderBase(IGM, target, relativeAddressBase) {
+      HasUnfilledParent = computeUnfilledParent();
+    }
     
     CanType getTargetType() const {
       return Target->getDeclaredType()->getCanonicalType();
     }
+
     bool requiresInitializationFunction() const {
-      return false;
+      return HasUnfilledParent;
     }
+    void emitInitialization(IRGenFunction &IGF, llvm::Value *metadata) {
+      if (HasUnfilledParent) {
+        auto parentType = getTargetType().getNominalParent();
+        auto parentMetadata = IGF.emitTypeMetadataRef(parentType);
+
+        int index = ValueTypeParentIndex;
+        Address slot = emitAddressOfMetadataSlotAtIndex(IGF, metadata, index,
+                                                    IGF.IGM.TypeMetadataPtrTy);
+        IGF.Builder.CreateStore(parentMetadata, slot);
+      }
+    }
+
     void addValueWitnessTable() {
       auto type = this->Target->getDeclaredType()->getCanonicalType();
       addWord(emitValueWitnessTable(IGM, type));
@@ -4983,40 +5423,76 @@ namespace {
     void addPayloadSize() const {
       llvm_unreachable("nongeneric enums shouldn't need payload size in metadata");
     }
+
+    void flagUnfilledParent() {
+      assert(HasUnfilledParent);
+    }
   };
 }
 
 llvm::Constant *
-irgen::emitForeignTypeMetadataInitializer(IRGenModule &IGM, CanType type,
-                                          Size &offsetOfAddressPoint) {
+IRGenModule::getAddrOfForeignTypeMetadataCandidate(CanType type) {
+  // What we save in GlobalVars is actually the offsetted value.
+  auto entity = LinkEntity::forForeignTypeMetadataCandidate(type);
+  if (auto entry = GlobalVars[entity])
+    return entry;
+
+  // Create a temporary base for relative references.
+  auto tempBase = createTemporaryRelativeAddressBase(*this);
+  
+  // Compute the constant initializer and the offset of the type
+  // metadata candidate within it.
+  Size addressPoint;
+  llvm::Constant *init;
   if (auto classType = dyn_cast<ClassType>(type)) {
     assert(!classType.getParent());
     auto classDecl = classType->getDecl();
     assert(classDecl->isForeign());
 
-    ForeignClassMetadataBuilder builder(IGM, classDecl);
+    ForeignClassMetadataBuilder builder(*this, classDecl);
     builder.layout();
-    offsetOfAddressPoint = builder.getOffsetOfAddressPoint();
-    return builder.getInit();
+    addressPoint = builder.getOffsetOfAddressPoint();
+    init = builder.getInit();
   } else if (auto structType = dyn_cast<StructType>(type)) {
     auto structDecl = structType->getDecl();
     assert(structDecl->hasClangNode());
     
-    ForeignStructMetadataBuilder builder(IGM, structDecl);
+    ForeignStructMetadataBuilder builder(*this, structDecl, tempBase.get());
     builder.layout();
-    offsetOfAddressPoint = builder.getOffsetOfAddressPoint();
-    return builder.getInit();
+    addressPoint = builder.getOffsetOfAddressPoint();
+    init = builder.getInit();
   } else if (auto enumType = dyn_cast<EnumType>(type)) {
     auto enumDecl = enumType->getDecl();
     assert(enumDecl->hasClangNode());
     
-    ForeignEnumMetadataBuilder builder(IGM, enumDecl);
+    ForeignEnumMetadataBuilder builder(*this, enumDecl, tempBase.get());
     builder.layout();
-    offsetOfAddressPoint = builder.getOffsetOfAddressPoint();
-    return builder.getInit();
+    addressPoint = builder.getOffsetOfAddressPoint();
+    init = builder.getInit();
   } else {
     llvm_unreachable("foreign metadata for unexpected type?!");
   }
+  
+  // Create the global variable.
+  LinkInfo link = LinkInfo::get(*this, entity, ForDefinition);
+  auto var = link.createVariable(*this, init->getType(),
+                                 getPointerAlignment());
+  var->setInitializer(init);
+  
+  // Close the loop on relative references.
+  replaceTemporaryRelativeAddressBase(*this, std::move(tempBase), var);
+
+  // Apply the offset.
+  llvm::Constant *result = var;
+  result = llvm::ConstantExpr::getBitCast(result, Int8PtrTy);
+  result = llvm::ConstantExpr::getInBoundsGetElementPtr(
+      Int8Ty, result, getSize(addressPoint));
+  result = llvm::ConstantExpr::getBitCast(result, TypeMetadataPtrTy);
+
+  // Only remember the offset.
+  GlobalVars[entity] = result;
+
+  return result;
 }
 
 // Protocols
@@ -5029,55 +5505,59 @@ SpecialProtocol irgen::getSpecialProtocolID(ProtocolDecl *P) {
   switch (*known) {
   case KnownProtocolKind::AnyObject:
     return SpecialProtocol::AnyObject;
-  case KnownProtocolKind::ErrorType:
-    return SpecialProtocol::ErrorType;
+  case KnownProtocolKind::Error:
+    return SpecialProtocol::Error;
     
   // The other known protocols aren't special at runtime.
-  case KnownProtocolKind::SequenceType:
-  case KnownProtocolKind::GeneratorType:
-  case KnownProtocolKind::BooleanType:
+  case KnownProtocolKind::Sequence:
+  case KnownProtocolKind::IteratorProtocol:
   case KnownProtocolKind::RawRepresentable:
   case KnownProtocolKind::Equatable:
   case KnownProtocolKind::Hashable:
   case KnownProtocolKind::Comparable:
   case KnownProtocolKind::ObjectiveCBridgeable:
   case KnownProtocolKind::DestructorSafeContainer:
-  case KnownProtocolKind::ArrayLiteralConvertible:
-  case KnownProtocolKind::BooleanLiteralConvertible:
-  case KnownProtocolKind::DictionaryLiteralConvertible:
-  case KnownProtocolKind::ExtendedGraphemeClusterLiteralConvertible:
-  case KnownProtocolKind::FloatLiteralConvertible:
-  case KnownProtocolKind::IntegerLiteralConvertible:
-  case KnownProtocolKind::StringInterpolationConvertible:
-  case KnownProtocolKind::StringLiteralConvertible:
-  case KnownProtocolKind::NilLiteralConvertible:
-  case KnownProtocolKind::UnicodeScalarLiteralConvertible:
-  case KnownProtocolKind::ColorLiteralConvertible:
-  case KnownProtocolKind::ImageLiteralConvertible:
-  case KnownProtocolKind::FileReferenceLiteralConvertible:
-  case KnownProtocolKind::BuiltinBooleanLiteralConvertible:
-  case KnownProtocolKind::BuiltinExtendedGraphemeClusterLiteralConvertible:
-  case KnownProtocolKind::BuiltinFloatLiteralConvertible:
-  case KnownProtocolKind::BuiltinIntegerLiteralConvertible:
-  case KnownProtocolKind::BuiltinStringLiteralConvertible:
-  case KnownProtocolKind::BuiltinUTF16StringLiteralConvertible:
-  case KnownProtocolKind::BuiltinUnicodeScalarLiteralConvertible:
-  case KnownProtocolKind::OptionSetType:
+  case KnownProtocolKind::SwiftNewtypeWrapper:
+  case KnownProtocolKind::ExpressibleByArrayLiteral:
+  case KnownProtocolKind::ExpressibleByBooleanLiteral:
+  case KnownProtocolKind::ExpressibleByDictionaryLiteral:
+  case KnownProtocolKind::ExpressibleByExtendedGraphemeClusterLiteral:
+  case KnownProtocolKind::ExpressibleByFloatLiteral:
+  case KnownProtocolKind::ExpressibleByIntegerLiteral:
+  case KnownProtocolKind::ExpressibleByStringInterpolation:
+  case KnownProtocolKind::ExpressibleByStringLiteral:
+  case KnownProtocolKind::ExpressibleByNilLiteral:
+  case KnownProtocolKind::ExpressibleByUnicodeScalarLiteral:
+  case KnownProtocolKind::ExpressibleByColorLiteral:
+  case KnownProtocolKind::ExpressibleByImageLiteral:
+  case KnownProtocolKind::ExpressibleByFileReferenceLiteral:
+  case KnownProtocolKind::ExpressibleByBuiltinBooleanLiteral:
+  case KnownProtocolKind::ExpressibleByBuiltinExtendedGraphemeClusterLiteral:
+  case KnownProtocolKind::ExpressibleByBuiltinFloatLiteral:
+  case KnownProtocolKind::ExpressibleByBuiltinIntegerLiteral:
+  case KnownProtocolKind::ExpressibleByBuiltinStringLiteral:
+  case KnownProtocolKind::ExpressibleByBuiltinUTF16StringLiteral:
+  case KnownProtocolKind::ExpressibleByBuiltinUnicodeScalarLiteral:
+  case KnownProtocolKind::OptionSet:
   case KnownProtocolKind::BridgedNSError:
+  case KnownProtocolKind::BridgedStoredNSError:
+  case KnownProtocolKind::ErrorCodeProtocol:
     return SpecialProtocol::None;
   }
 }
 
 namespace {
-  class ProtocolDescriptorBuilder {
-    IRGenModule &IGM;
-    ProtocolDecl *Protocol;
+  const unsigned NumProtocolDescriptorFields = 13;
 
-    SmallVector<llvm::Constant*, 8> Fields;
+  class ProtocolDescriptorBuilder : public ConstantBuilder<> {
+    ProtocolDecl *Protocol;
+    SILDefaultWitnessTable *DefaultWitnesses;
 
   public:
-    ProtocolDescriptorBuilder(IRGenModule &IGM, ProtocolDecl *protocol)
-      : IGM(IGM), Protocol(protocol) {}
+    ProtocolDescriptorBuilder(IRGenModule &IGM, ProtocolDecl *protocol,
+                              SILDefaultWitnessTable *defaultWitnesses)
+      : ConstantBuilder(IGM), Protocol(protocol),
+        DefaultWitnesses(defaultWitnesses) {}
 
     void layout() {
       addObjCCompatibilityIsa();
@@ -5086,16 +5566,13 @@ namespace {
       addObjCCompatibilityTables();
       addSize();
       addFlags();
+      addDefaultWitnessTable();
     }
 
-    llvm::Constant *null() {
-      return llvm::ConstantPointerNull::get(IGM.Int8PtrTy);
-    }
-    
     void addObjCCompatibilityIsa() {
       // The ObjC runtime will drop a reference to its magic Protocol class
       // here.
-      Fields.push_back(null());
+      addWord(llvm::ConstantPointerNull::get(IGM.Int8PtrTy));
     }
     
     void addName() {
@@ -5109,14 +5586,14 @@ namespace {
         Protocol->getDeclaredType()->getCanonicalType());
       name.mangle(mangling);
       auto global = IGM.getAddrOfGlobalString(mangling);
-      Fields.push_back(global);
+      addWord(global);
     }
     
     void addInherited() {
       // If there are no inherited protocols, produce null.
       auto inherited = Protocol->getInheritedProtocols(nullptr);
       if (inherited.empty()) {
-        Fields.push_back(null());
+        addWord(llvm::ConstantPointerNull::get(IGM.Int8PtrTy));
         return;
       }
       
@@ -5126,7 +5603,8 @@ namespace {
       inheritedDescriptors.push_back(IGM.getSize(Size(inherited.size())));
       
       for (ProtocolDecl *p : inherited) {
-        auto descriptor = IGM.getAddrOfProtocolDescriptor(p, NotForDefinition);
+        auto descriptor = IGM.getAddrOfProtocolDescriptor(p, NotForDefinition,
+                                                          nullptr);
         inheritedDescriptors.push_back(descriptor);
       }
       
@@ -5139,27 +5617,26 @@ namespace {
       
       llvm::Constant *inheritedVarPtr
         = llvm::ConstantExpr::getBitCast(inheritedVar, IGM.Int8PtrTy);
-      Fields.push_back(inheritedVarPtr);
+      addWord(inheritedVarPtr);
     }
     
     void addObjCCompatibilityTables() {
       // Required instance methods
-      Fields.push_back(null());
+      addWord(llvm::ConstantPointerNull::get(IGM.Int8PtrTy));
       // Required class methods
-      Fields.push_back(null());
+      addWord(llvm::ConstantPointerNull::get(IGM.Int8PtrTy));
       // Optional instance methods
-      Fields.push_back(null());
+      addWord(llvm::ConstantPointerNull::get(IGM.Int8PtrTy));
       // Optional class methods
-      Fields.push_back(null());
+      addWord(llvm::ConstantPointerNull::get(IGM.Int8PtrTy));
       // Properties
-      Fields.push_back(null());
+      addWord(llvm::ConstantPointerNull::get(IGM.Int8PtrTy));
     }
     
     void addSize() {
       // The number of fields so far in words, plus 4 bytes for size and
       // 4 bytes for flags.
-      unsigned sz = (Fields.size() * IGM.getPointerSize()).getValue() + 4 + 4;
-      Fields.push_back(llvm::ConstantInt::get(IGM.Int32Ty, sz));
+      addConstantInt32(getNextOffset().getValue() + 4 + 4);
     }
     
     void addFlags() {
@@ -5171,14 +5648,37 @@ namespace {
         .withDispatchStrategy(
                 Lowering::TypeConverter::getProtocolDispatchStrategy(Protocol))
         .withSpecialProtocol(getSpecialProtocolID(Protocol));
-      
-      Fields.push_back(llvm::ConstantInt::get(IGM.Int32Ty,
-                                              flags.getIntValue()));
+
+      if (DefaultWitnesses)
+        flags = flags.withResilient(true);
+
+      addConstantInt32(flags.getIntValue());
+    }
+
+    void addDefaultWitnessTable() {
+      // The runtime ignores these fields if the IsResilient flag is not set.
+      if (DefaultWitnesses) {
+        addConstantInt16(DefaultWitnesses->getMinimumWitnessTableSize());
+        addConstantInt16(DefaultWitnesses->getDefaultWitnessTableSize());
+
+        // Unused padding
+        addConstantInt32(0);
+
+        for (auto entry : DefaultWitnesses->getResilientDefaultEntries()) {
+          addWord(IGM.getAddrOfSILFunction(entry.getWitness(), NotForDefinition));
+        }
+      } else {
+        addConstantInt16(0);
+        addConstantInt16(0);
+
+        // Unused padding
+        addConstantInt32(0);
+      }
     }
 
     llvm::Constant *getInit() {
-      return llvm::ConstantStruct::get(IGM.ProtocolDescriptorStructTy,
-                                       Fields);
+      return getInitWithSuggestedType(NumProtocolDescriptorFields,
+                                      IGM.ProtocolDescriptorStructTy);
     }
   };
 } // end anonymous namespace
@@ -5187,12 +5687,15 @@ namespace {
 /// the protocol descriptor, and for ObjC interop, references to the descriptor
 /// that the ObjC runtime uses for uniquing.
 void IRGenModule::emitProtocolDecl(ProtocolDecl *protocol) {
+  // Emit remote reflection metadata for the protocol.
+  emitFieldMetadataRecord(protocol);
+
   // If the protocol is Objective-C-compatible, go through the path that
   // produces an ObjC-compatible protocol_t.
   if (protocol->isObjC()) {
     // In JIT mode, we need to create protocol descriptors using the ObjC
     // runtime in JITted code.
-    if (Opts.UseJIT)
+    if (IRGen.Opts.UseJIT)
       return;
     
     // Native ObjC protocols are emitted on-demand in ObjC and uniqued by the
@@ -5203,13 +5706,17 @@ void IRGenModule::emitProtocolDecl(ProtocolDecl *protocol) {
     getObjCProtocolGlobalVars(protocol);
     return;
   }
-  
-  ProtocolDescriptorBuilder builder(*this, protocol);
-  builder.layout();
-  auto init = builder.getInit();
 
+  SILDefaultWitnessTable *defaultWitnesses = nullptr;
+  if (!protocol->hasFixedLayout())
+    defaultWitnesses = getSILModule().lookUpDefaultWitnessTable(protocol);
+  ProtocolDescriptorBuilder builder(*this, protocol, defaultWitnesses);
+  builder.layout();
+
+  auto init = builder.getInit();
   auto var = cast<llvm::GlobalVariable>(
-                       getAddrOfProtocolDescriptor(protocol, ForDefinition));
+                       getAddrOfProtocolDescriptor(protocol, ForDefinition,
+                                                   init->getType()));
   var->setConstant(true);
   var->setInitializer(init);
 }
@@ -5224,7 +5731,8 @@ void IRGenModule::emitProtocolDecl(ProtocolDecl *protocol) {
 llvm::Value *irgen::emitProtocolDescriptorRef(IRGenFunction &IGF,
                                               ProtocolDecl *protocol) {
   if (!protocol->isObjC())
-    return IGF.IGM.getAddrOfProtocolDescriptor(protocol, NotForDefinition);
+    return IGF.IGM.getAddrOfProtocolDescriptor(protocol, NotForDefinition,
+                                               nullptr);
   
   auto refVar = IGF.IGM.getAddrOfObjCProtocolRef(protocol, NotForDefinition);
   llvm::Value *val

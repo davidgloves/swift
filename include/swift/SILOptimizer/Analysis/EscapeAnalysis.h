@@ -104,14 +104,16 @@ class EscapeAnalysis : public BottomUpIPAnalysis {
     Global
   };
 
-  class CGNode;
-  class CGNodeMap;
 public:
+  class CGNode;
   class ConnectionGraph;
 private:
+  class CGNodeMap;
 
   /// The int-part is an EdgeType and specifies which kind of predecessor it is.
   typedef llvm::PointerIntPair<CGNode *, 1> Predecessor;
+
+public:
 
   /// A node in the connection graph.
   /// A node basically represents a "pointer" or the "memory content" where a
@@ -302,7 +304,9 @@ private:
     CGNode *getContentNodeOrNull() const {
       return pointsTo;
     }
-};
+  };
+
+private:
 
   /// Mapping from nodes in a callee-graph to nodes in a caller-graph.
   class CGNodeMap {
@@ -501,11 +505,25 @@ public:
     }
 
     /// Creates a defer-edge between \p From and \p To.
-    /// This may invalidate the graph invariance 4). See addDeferEdge.
-    bool defer(CGNode *From, CGNode *To) {
-      bool EdgeAdded = addDeferEdge(From, To);
+    /// This may trigger node merges to keep the graph invariance 4).
+    /// Returns the \p From node or its merge-target in case \p From was merged
+    /// during adding the edge.
+    /// The \p EdgeAdded is set to true if there was no defer-edge between
+    /// \p From and \p To, yet.
+    CGNode *defer(CGNode *From, CGNode *To, bool &EdgeAdded) {
+      if (addDeferEdge(From, To))
+        EdgeAdded = true;
       mergeAllScheduledNodes();
-      return EdgeAdded;
+      return From->getMergeTarget();
+    }
+
+    /// Creates a defer-edge between \p From and \p To.
+    /// This may trigger node merges to keep the graph invariance 4).
+    /// Returns the \p From node or its merge-target in case \p From was merged
+    /// during adding the edge.
+    CGNode *defer(CGNode *From, CGNode *To) {
+      bool UnusedEdgeAddedFlag = false;
+      return defer(From, To, UnusedEdgeAddedFlag);
     }
 
     /// Merges the \p SourceGraph into this graph. The \p Mapping contains the
@@ -561,7 +579,7 @@ public:
     /// program, displaying the connection graph. This depends on there being a
     /// dot graph viewer program, like 'graphviz', in your path.
     ///
-    /// Defer-edges are grey, points-to edges are black.
+    /// Defer-edges are gray, points-to edges are black.
     /// Content nodes are rounded rectangles, argument/return nodes are bold.
     /// Global escaping nodes are red, argument escaping nodes are blue.
     void viewCG() const;

@@ -36,6 +36,16 @@ enum class CommentRetentionMode {
   ReturnAsTokens,
 };
 
+/// Kinds of conflict marker which the lexer might encounter.
+enum class ConflictMarkerKind {
+  /// A normal or diff3 conflict marker, initiated by at least 7 "<"s,
+  /// separated by at least 7 "="s or "|"s, and terminated by at least 7 ">"s.
+  Normal,
+  /// A Perforce-style conflict marker, initiated by 4 ">"s,
+  /// separated by 4 "="s, and terminated by 4 "<"s.
+  Perforce
+};
+  
 class Lexer {
   const LangOptions &LangOpts;
   const SourceManager &SourceMgr;
@@ -140,7 +150,7 @@ public:
   ///   need to take a LangOptions explicitly.
   /// \param InSILMode - whether we're parsing a SIL source file.
   ///   Unlike language options, this does affect primitive lexing, which
-  ///   means that APIs like getLofForEndOfToken really ought to take
+  ///   means that APIs like getLocForEndOfToken really ought to take
   ///   this flag; it's just that we don't care that much about fidelity
   ///   when parsing SIL files.
   Lexer(const LangOptions &Options,
@@ -423,6 +433,7 @@ private:
   void skipHashbang();
 
   void skipSlashStarComment();
+  void lexHash();
   void lexIdentifier();
   void lexDollarIdent();
   void lexOperatorIdentifier();
@@ -437,6 +448,10 @@ private:
 
   void tryLexEditorPlaceholder();
   const char *findEndOfCurlyQuoteStringLiteral(const char*);
+
+  /// Try to lex conflict markers by checking for the presence of the start and
+  /// end of the marker in diff3 or Perforce style respectively.
+  bool tryLexConflictMarker();
 };
   
 } // end namespace swift

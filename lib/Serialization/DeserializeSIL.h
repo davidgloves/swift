@@ -49,6 +49,10 @@ namespace swift {
     std::vector<ModuleFile::PartiallySerialized<SILWitnessTable *>>
     WitnessTables;
 
+    std::unique_ptr<SerializedFuncTable> DefaultWitnessTableList;
+    std::vector<ModuleFile::PartiallySerialized<SILDefaultWitnessTable *>>
+    DefaultWitnessTables;
+
     /// A declaration will only
     llvm::DenseMap<NormalProtocolConformance *, SILWitnessTable *>
     ConformanceToWitnessTableMap;
@@ -78,6 +82,7 @@ namespace swift {
                                      SmallVectorImpl<uint64_t> &scratch);
     /// Read a SIL instruction within a given SIL basic block.
     bool readSILInstruction(SILFunction *Fn, SILBasicBlock *BB,
+                            SILBuilder &Builder,
                             unsigned RecordKind,
                             SmallVectorImpl<uint64_t> &scratch);
 
@@ -98,8 +103,10 @@ namespace swift {
     SILGlobalVariable *getGlobalForReference(StringRef Name);
     SILGlobalVariable *readGlobalVar(StringRef Name);
     SILWitnessTable *readWitnessTable(serialization::DeclID,
-                                      SILWitnessTable *existingWt,
-                                      bool declarationOnly);
+                                      SILWitnessTable *existingWt);
+    SILDefaultWitnessTable *
+    readDefaultWitnessTable(serialization::DeclID,
+                            SILDefaultWitnessTable *existingWt);
 
 public:
     Identifier getModuleIdentifier() const {
@@ -109,15 +116,22 @@ public:
       return MF->getFile();
     }
     SILFunction *lookupSILFunction(SILFunction *InFunc);
-    SILFunction *lookupSILFunction(StringRef Name);
+    SILFunction *lookupSILFunction(StringRef Name,
+                                   bool declarationOnly = false);
+    bool hasSILFunction(StringRef Name, SILLinkage Linkage);
     SILVTable *lookupVTable(Identifier Name);
     SILWitnessTable *lookupWitnessTable(SILWitnessTable *wt);
+    SILDefaultWitnessTable *
+    lookupDefaultWitnessTable(SILDefaultWitnessTable *wt);
 
     /// Invalidate all cached SILFunctions.
     void invalidateFunctionCache();
 
-    /// Deserialize all SILFunctions, VTables, and WitnessTables inside the
-    /// module and add them to SILMod.
+    /// Invalidate a specific cached SILFunction.
+    bool invalidateFunction(SILFunction *F);
+
+    /// Deserialize all SILFunctions, VTables, WitnessTables, and
+    /// DefaultWitnessTables inside the module, and add them to SILMod.
     ///
     /// TODO: Globals.
     void getAll(bool UseCallback = true) {
@@ -129,6 +143,7 @@ public:
       getAllSILFunctions();
       getAllVTables();
       getAllWitnessTables();
+      getAllDefaultWitnessTables();
     }
 
     /// Deserialize all SILFunctions inside the module and add them to SILMod.
@@ -139,6 +154,10 @@ public:
 
     /// Deserialize all WitnessTables inside the module and add them to SILMod.
     void getAllWitnessTables();
+
+    /// Deserialize all DefaultWitnessTables inside the module and add them
+    /// to SILMod.
+    void getAllDefaultWitnessTables();
 
     SILDeserializer(ModuleFile *MF, SILModule &M,
                     SerializedSILLoader::Callback *callback);

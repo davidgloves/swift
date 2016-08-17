@@ -30,7 +30,7 @@
 #include "swift/Basic/Timer.h"
 #include "swift/ClangImporter/ClangImporter.h"
 #include "swift/Parse/Lexer.h"
-#include "swift/Sema/CodeCompletionTypeChecking.h"
+#include "swift/Sema/IDETypeChecking.h"
 #include "swift/Strings.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/PointerUnion.h"
@@ -93,61 +93,61 @@ ProtocolDecl *TypeChecker::getProtocol(SourceLoc loc, KnownProtocolKind kind) {
 ProtocolDecl *TypeChecker::getLiteralProtocol(Expr *expr) {
   if (isa<ArrayExpr>(expr))
     return getProtocol(expr->getLoc(),
-                       KnownProtocolKind::ArrayLiteralConvertible);
+                       KnownProtocolKind::ExpressibleByArrayLiteral);
 
   if (isa<DictionaryExpr>(expr))
     return getProtocol(expr->getLoc(),
-                       KnownProtocolKind::DictionaryLiteralConvertible);
+                       KnownProtocolKind::ExpressibleByDictionaryLiteral);
 
   if (!isa<LiteralExpr>(expr))
     return nullptr;
   
   if (isa<NilLiteralExpr>(expr))
     return getProtocol(expr->getLoc(),
-                       KnownProtocolKind::NilLiteralConvertible);
+                       KnownProtocolKind::ExpressibleByNilLiteral);
   
   if (isa<IntegerLiteralExpr>(expr))
     return getProtocol(expr->getLoc(),
-                       KnownProtocolKind::IntegerLiteralConvertible);
+                       KnownProtocolKind::ExpressibleByIntegerLiteral);
 
   if (isa<FloatLiteralExpr>(expr))
     return getProtocol(expr->getLoc(),
-                       KnownProtocolKind::FloatLiteralConvertible);
+                       KnownProtocolKind::ExpressibleByFloatLiteral);
 
   if (isa<BooleanLiteralExpr>(expr))
     return getProtocol(expr->getLoc(),
-                       KnownProtocolKind::BooleanLiteralConvertible);
+                       KnownProtocolKind::ExpressibleByBooleanLiteral);
 
   if (const auto *SLE = dyn_cast<StringLiteralExpr>(expr)) {
     if (SLE->isSingleUnicodeScalar())
       return getProtocol(
           expr->getLoc(),
-          KnownProtocolKind::UnicodeScalarLiteralConvertible);
+          KnownProtocolKind::ExpressibleByUnicodeScalarLiteral);
 
     if (SLE->isSingleExtendedGraphemeCluster())
       return getProtocol(
           expr->getLoc(),
-          KnownProtocolKind::ExtendedGraphemeClusterLiteralConvertible);
+          KnownProtocolKind::ExpressibleByExtendedGraphemeClusterLiteral);
 
     return getProtocol(expr->getLoc(),
-                       KnownProtocolKind::StringLiteralConvertible);
+                       KnownProtocolKind::ExpressibleByStringLiteral);
   }
 
   if (isa<InterpolatedStringLiteralExpr>(expr))
     return getProtocol(expr->getLoc(),
-                       KnownProtocolKind::StringInterpolationConvertible);
+                       KnownProtocolKind::ExpressibleByStringInterpolation);
 
   if (auto E = dyn_cast<MagicIdentifierLiteralExpr>(expr)) {
     switch (E->getKind()) {
     case MagicIdentifierLiteralExpr::File:
     case MagicIdentifierLiteralExpr::Function:
       return getProtocol(expr->getLoc(),
-                         KnownProtocolKind::StringLiteralConvertible);
+                         KnownProtocolKind::ExpressibleByStringLiteral);
 
     case MagicIdentifierLiteralExpr::Line:
     case MagicIdentifierLiteralExpr::Column:
       return getProtocol(expr->getLoc(),
-                         KnownProtocolKind::IntegerLiteralConvertible);
+                         KnownProtocolKind::ExpressibleByIntegerLiteral);
 
     case MagicIdentifierLiteralExpr::DSOHandle:
       return nullptr;
@@ -155,18 +155,11 @@ ProtocolDecl *TypeChecker::getLiteralProtocol(Expr *expr) {
   }
 
   if (auto E = dyn_cast<ObjectLiteralExpr>(expr)) {
-    Identifier name = E->getName();
-    if (name.str().equals("Color")) {
-      return getProtocol(expr->getLoc(),
-                         KnownProtocolKind::ColorLiteralConvertible);
-    } else if (name.str().equals("Image")) {
-      return getProtocol(expr->getLoc(),
-                         KnownProtocolKind::ImageLiteralConvertible);
-    } else if (name.str().equals("FileReference")) {
-      return getProtocol(expr->getLoc(),
-                         KnownProtocolKind::FileReferenceLiteralConvertible);
-    } else {
-      return nullptr;
+    switch (E->getLiteralKind()) {
+#define POUND_OBJECT_LITERAL(Name, Desc, Protocol)\
+    case ObjectLiteralExpr::Name:\
+      return getProtocol(expr->getLoc(), KnownProtocolKind::Protocol);
+#include "swift/Parse/Tokens.def"
     }
   }
 
@@ -174,22 +167,59 @@ ProtocolDecl *TypeChecker::getLiteralProtocol(Expr *expr) {
 }
 
 DeclName TypeChecker::getObjectLiteralConstructorName(ObjectLiteralExpr *expr) {
-  Identifier name = expr->getName();
-  if (name.str().equals("Color")) {
+  switch (expr->getLiteralKind()) {
+  case ObjectLiteralExpr::colorLiteral: {
     return DeclName(Context, Context.Id_init,
                     { Context.getIdentifier("colorLiteralRed"),
                       Context.getIdentifier("green"),
                       Context.getIdentifier("blue"),
                       Context.getIdentifier("alpha") });
-  } else if (name.str().equals("Image")) {
-    return DeclName(Context, Context.Id_init,
-                    { Context.getIdentifier("imageLiteral") });
-  } else if (name.str().equals("FileReference")) {
-    return DeclName(Context, Context.Id_init,
-                    { Context.getIdentifier("fileReferenceLiteral") });
-  } else {
-    return DeclName();
   }
+  case ObjectLiteralExpr::imageLiteral: {
+    return DeclName(Context, Context.Id_init,
+                    { Context.getIdentifier("imageLiteralResourceName") });
+  }
+  case ObjectLiteralExpr::fileLiteral: {
+    return DeclName(Context, Context.Id_init,
+            { Context.getIdentifier("fileReferenceLiteralResourceName") });
+  }
+  }
+  llvm_unreachable("unknown literal constructor");
+}
+
+/// Return an idealized form of the parameter type of the given
+/// object-literal initializer.  This removes references to the protocol
+/// name from the first argument label, which would be otherwise be
+/// redundant when writing out the object-literal syntax:
+///
+///   #fileLiteral(fileReferenceLiteralResourceName: "hello.jpg")
+///
+/// Doing this allows us to preserve a nicer (and source-compatible)
+/// literal syntax while still giving the initializer a semantically
+/// unambiguous name.
+Type TypeChecker::getObjectLiteralParameterType(ObjectLiteralExpr *expr,
+                                                ConstructorDecl *ctor) {
+  Type argType = ctor->getArgumentType();
+  auto argTuple = argType->getAs<TupleType>();
+  if (!argTuple) return argType;
+
+  auto replace = [&](StringRef replacement) -> Type {
+    SmallVector<TupleTypeElt, 4> elements;
+    elements.append(argTuple->getElements().begin(),
+                    argTuple->getElements().end());
+    elements[0] = TupleTypeElt(elements[0].getType(),
+                               Context.getIdentifier(replacement));
+    return TupleType::get(elements, Context);
+  };
+
+  switch (expr->getLiteralKind()) {
+  case ObjectLiteralExpr::colorLiteral:
+    return replace("red");
+  case ObjectLiteralExpr::fileLiteral:
+  case ObjectLiteralExpr::imageLiteral:
+    return replace("resourceName");
+  }
+  llvm_unreachable("unknown literal constructor");
 }
 
 Module *TypeChecker::getStdlibModule(const DeclContext *dc) {
@@ -213,13 +243,13 @@ Type TypeChecker::lookupBoolType(const DeclContext *dc) {
       getStdlibModule(dc)->lookupValue({}, Context.getIdentifier("Bool"),
                                        NLKind::QualifiedLookup, results);
       if (results.size() != 1) {
-        diagnose(SourceLoc(), diag::bool_type_broken);
+        diagnose(SourceLoc(), diag::broken_bool);
         return Type();
       }
 
       auto tyDecl = dyn_cast<TypeDecl>(results.front());
       if (!tyDecl) {
-        diagnose(SourceLoc(), diag::bool_type_broken);
+        diagnose(SourceLoc(), diag::broken_bool);
         return Type();
       }
 
@@ -301,7 +331,7 @@ static void bindExtensionDecl(ExtensionDecl *ED, TypeChecker &TC) {
   }
 
   // Cannot extend a bound generic type.
-  if (extendedType->isSpecialized()) {
+  if (extendedType->isSpecialized() && extendedType->getAnyNominal()) {
     TC.diagnose(ED->getLoc(), diag::extension_specialization,
                 extendedType->getAnyNominal()->getName())
       .highlight(ED->getExtendedTypeLoc().getSourceRange());
@@ -473,7 +503,7 @@ static void typeCheckFunctionsAndExternalDecls(TypeChecker &TC) {
            currentExternalDef < TC.Context.ExternalDefinitions.size() ||
            !TC.UsedConformances.empty());
 
-  // FIXME: Horrible hack. Store this somewhere more sane.
+  // FIXME: Horrible hack. Store this somewhere more appropriate.
   TC.Context.LastCheckedExternalDefinition = currentExternalDef;
 
   // Compute captures for functions and closures we visited.
@@ -506,7 +536,8 @@ void swift::typeCheckExternalDefinitions(SourceFile &SF) {
 
 void swift::performTypeChecking(SourceFile &SF, TopLevelContext &TLC,
                                 OptionSet<TypeCheckingFlags> Options,
-                                unsigned StartElem) {
+                                unsigned StartElem,
+                                unsigned WarnLongFunctionBodies) {
   if (SF.ASTStage == SourceFile::TypeChecked)
     return;
 
@@ -524,6 +555,7 @@ void swift::performTypeChecking(SourceFile &SF, TopLevelContext &TLC,
     TypeChecker TC(Ctx);
     SharedTimer timer("Type checking / Semantic analysis");
 
+    TC.setWarnLongFunctionBodies(WarnLongFunctionBodies);
     if (Options.contains(TypeCheckingFlags::DebugTimeFunctionBodies))
       TC.enableDebugTimeFunctionBodies();
 
@@ -624,6 +656,15 @@ void swift::performTypeChecking(SourceFile &SF, TopLevelContext &TLC,
   }
 }
 
+void swift::finishTypeChecking(SourceFile &SF) {
+  auto &Ctx = SF.getASTContext();
+  TypeChecker TC(Ctx);
+
+  for (auto D : SF.Decls)
+    if (auto PD = dyn_cast<ProtocolDecl>(D))
+      TC.inferDefaultWitnesses(PD);
+}
+
 void swift::performWholeModuleTypeChecking(SourceFile &SF) {
   auto &Ctx = SF.getASTContext();
   Ctx.diagnoseAttrsRequiringFoundation(SF);
@@ -633,12 +674,25 @@ void swift::performWholeModuleTypeChecking(SourceFile &SF) {
 }
 
 bool swift::performTypeLocChecking(ASTContext &Ctx, TypeLoc &T,
-                                   bool isSILType, DeclContext *DC,
+                                   DeclContext *DC,
+                                   bool ProduceDiagnostics) {
+  return performTypeLocChecking(Ctx, T,
+                                /*isSILMode=*/false,
+                                /*isSILType=*/false,
+                                DC, ProduceDiagnostics);
+}
+
+bool swift::performTypeLocChecking(ASTContext &Ctx, TypeLoc &T,
+                                   bool isSILMode,
+                                   bool isSILType,
+                                   DeclContext *DC,
                                    bool ProduceDiagnostics) {
   TypeResolutionOptions options;
 
   // Fine to have unbound generic types.
   options |= TR_AllowUnboundGenerics;
+  if (isSILMode)
+    options |= TR_SILMode;
   if (isSILType)
     options |= TR_SILType;
 
@@ -669,27 +723,61 @@ bool swift::typeCheckCompletionDecl(Decl *D) {
   return true;
 }
 
-bool swift::isConvertibleTo(Type Ty1, Type Ty2, DeclContext *DC) {
-  auto &Ctx = DC->getASTContext();
+bool swift::isConvertibleTo(Type Ty1, Type Ty2, DeclContext &DC) {
+  auto &Ctx = DC.getASTContext();
 
   // We try to reuse the type checker associated with the ast context first.
   if (Ctx.getLazyResolver()) {
     TypeChecker *TC = static_cast<TypeChecker*>(Ctx.getLazyResolver());
-    return TC->isConvertibleTo(Ty1, Ty2, DC);
+    return TC->isConvertibleTo(Ty1, Ty2, &DC);
   } else {
     DiagnosticEngine Diags(Ctx.SourceMgr);
-    TypeChecker TC(Ctx, Diags);
-    return TC.isConvertibleTo(Ty1, Ty2, DC);
+    return (new TypeChecker(Ctx, Diags))->isConvertibleTo(Ty1, Ty2, &DC);
   }
 }
 
-static Optional<Type> getTypeOfCompletionContextExpr(TypeChecker &TC,
-                                                     DeclContext *DC,
-                                                     Expr *&parsedExpr) {
+Type swift::lookUpTypeInContext(DeclContext *DC, StringRef Name) {
+  auto &Ctx = DC->getASTContext();
+  auto ReturnResult = [](UnqualifiedLookup &Lookup) {
+    if (auto Result = Lookup.getSingleTypeResult())
+      return Result->getDeclaredType();
+    return Type();
+  };
+  if (Ctx.getLazyResolver()) {
+    UnqualifiedLookup Lookup(DeclName(Ctx.getIdentifier(Name)), DC,
+                             Ctx.getLazyResolver(), false, SourceLoc(), true);
+    return ReturnResult(Lookup);
+  } else {
+    DiagnosticEngine Diags(Ctx.SourceMgr);
+    LazyResolver *Resolver = new TypeChecker(Ctx, Diags);
+    UnqualifiedLookup Lookup(DeclName(Ctx.getIdentifier(Name)), DC,
+                             Resolver, false, SourceLoc(), true);
+    return ReturnResult(Lookup);
+  }
+}
+
+static Optional<Type> getTypeOfCompletionContextExpr(
+                        TypeChecker &TC,
+                        DeclContext *DC,
+                        CompletionTypeCheckKind kind,
+                        Expr *&parsedExpr,
+                        ConcreteDeclRef &referencedDecl) {
+  switch (kind) {
+  case CompletionTypeCheckKind::Normal:
+    // Handle below.
+    break;
+
+  case CompletionTypeCheckKind::ObjCKeyPath:
+    referencedDecl = nullptr;
+    if (auto keyPath = dyn_cast<ObjCKeyPathExpr>(parsedExpr))
+      return TC.checkObjCKeyPathExpr(DC, keyPath, /*requireResulType=*/true);
+
+    return None;
+  }
 
   CanType originalType = parsedExpr->getType().getCanonicalTypeOrNull();
   if (auto T = TC.getTypeOfExpressionWithoutApplying(parsedExpr, DC,
-                                   FreeTypeVariableBinding::GenericParameters))
+                 referencedDecl, FreeTypeVariableBinding::GenericParameters))
     return T;
 
   // Try to recover if we've made any progress.
@@ -704,19 +792,24 @@ static Optional<Type> getTypeOfCompletionContextExpr(TypeChecker &TC,
 
 /// \brief Return the type of an expression parsed during code completion, or
 /// a null \c Type on error.
-Optional<Type> swift::getTypeOfCompletionContextExpr(ASTContext &Ctx,
-                                                     DeclContext *DC,
-                                                     Expr *&parsedExpr) {
+Optional<Type> swift::getTypeOfCompletionContextExpr(
+                        ASTContext &Ctx,
+                        DeclContext *DC,
+                        CompletionTypeCheckKind kind,
+                        Expr *&parsedExpr,
+                        ConcreteDeclRef &referencedDecl) {
 
   if (Ctx.getLazyResolver()) {
     TypeChecker *TC = static_cast<TypeChecker *>(Ctx.getLazyResolver());
-    return ::getTypeOfCompletionContextExpr(*TC, DC, parsedExpr);
+    return ::getTypeOfCompletionContextExpr(*TC, DC, kind, parsedExpr,
+                                            referencedDecl);
   } else {
     // Set up a diagnostics engine that swallows diagnostics.
     DiagnosticEngine diags(Ctx.SourceMgr);
     TypeChecker TC(Ctx, diags);
     // Try to solve for the actual type of the expression.
-    return ::getTypeOfCompletionContextExpr(TC, DC, parsedExpr);
+    return ::getTypeOfCompletionContextExpr(TC, DC, kind, parsedExpr,
+                                            referencedDecl);
   }
 }
 
@@ -1218,8 +1311,8 @@ private:
         continue;
       }
 
-      AvailabilityContext Range = contextForSpec(Spec);
-      Query->setAvailableRange(Range.getOSVersion());
+      AvailabilityContext NewConstraint = contextForSpec(Spec);
+      Query->setAvailableRange(NewConstraint.getOSVersion());
 
       if (Spec->getKind() == AvailabilitySpecKind::OtherPlatform) {
         // The wildcard spec '*' represents the minimum deployment target, so
@@ -1234,21 +1327,17 @@ private:
       // If the version range for the current TRC is completely contained in
       // the range for the spec, then a version query can never be false, so the
       // spec is useless. If so, report this.
-      if (CurrentInfo.isContainedIn(Range)) {
+      if (CurrentInfo.isContainedIn(NewConstraint)) {
         DiagnosticEngine &Diags = TC.Diags;
-        if (CurrentTRC->getReason() == TypeRefinementContext::Reason::Root) {
-          // Diagnose for checks that are useless because the minimum deployment
-          // target ensures they will never be false. We suppress this warning
-          // when compiling for playgrounds because the developer cannot
-          // cannot explicitly set the minimum deployment target to silence
-          // the alarm. We also suppress in script mode (where setting the
-          // minimum deployment target requires a target triple).
-          if (!TC.getLangOpts().Playground && !TC.getInImmediateMode()) {
-            Diags.diagnose(Query->getLoc(),
-                           diag::availability_query_useless_min_deployment,
-                           platformString(targetPlatform(TC.getLangOpts())));
-          }
-        } else {
+        // Some availability checks will always pass because the minimum
+        // deployment target guarantees they will never be false. We don't
+        // diagnose these checks as useless because the source file may
+        // be shared with other projects/targets having older deployment
+        // targets. We don't currently have a mechanism for the user to
+        // suppress these warnings (for example, by indicating when the
+        // required compatibility version is different than the deployment
+        // target).
+        if (CurrentTRC->getReason() != TypeRefinementContext::Reason::Root) {
           Diags.diagnose(Query->getLoc(),
                          diag::availability_query_useless_enclosing_scope,
                          platformString(targetPlatform(TC.getLangOpts())));
@@ -1269,7 +1358,7 @@ private:
       FalseFlow.unionWith(CurrentInfo);
 
       auto *TRC = TypeRefinementContext::createForConditionFollowingQuery(
-          TC.Context, Query, LastElement, CurrentTRC, Range);
+          TC.Context, Query, LastElement, CurrentTRC, NewConstraint);
 
       pushContext(TRC, ParentTy());
       NestedCount++;
@@ -1318,7 +1407,7 @@ private:
 
       // FIXME: This is not quite right: we want to handle AppExtensions
       // properly. For example, on the OSXApplicationExtension platform
-      // we want to chose the OSX spec unless there is an explicit
+      // we want to chose the OS X spec unless there is an explicit
       // OSXApplicationExtension spec.
       if (isPlatformActive(VersionSpec->getPlatform(), TC.getLangOpts())) {
         return VersionSpec;
@@ -1330,11 +1419,10 @@ private:
     return FoundOtherSpec;
   }
 
-  /// Return the availablity context for the given spec.
+  /// Return the availability context for the given spec.
   AvailabilityContext contextForSpec(AvailabilitySpec *Spec) {
     if (isa<OtherPlatformAvailabilitySpec>(Spec)) {
-      return AvailabilityContext(
-          VersionRange::allGTE(TC.getLangOpts().getMinPlatformVersion()));
+      return AvailabilityContext::alwaysAvailable();
     }
 
     auto *VersionSpec = cast<VersionConstraintAvailabilitySpec>(Spec);
@@ -2181,7 +2269,7 @@ static bool someEnclosingDeclMatches(SourceRange ReferenceRange,
 
 bool TypeChecker::isInsideImplicitFunction(SourceRange ReferenceRange,
                                            const DeclContext *DC) {
-  std::function<bool(const Decl *)> IsInsideImplicitFunc = [](const Decl *D) {
+  auto IsInsideImplicitFunc = [](const Decl *D) {
     auto *AFD = dyn_cast<AbstractFunctionDecl>(D);
     return AFD && AFD->isImplicit();
   };
@@ -2193,7 +2281,7 @@ bool TypeChecker::isInsideImplicitFunction(SourceRange ReferenceRange,
 
 bool TypeChecker::isInsideUnavailableDeclaration(
     SourceRange ReferenceRange, const DeclContext *ReferenceDC) {
-  std::function<bool(const Decl *)> IsUnavailable = [](const Decl *D) {
+  auto IsUnavailable = [](const Decl *D) {
     return D->getAttrs().getUnavailable(D->getASTContext());
   };
 
@@ -2201,78 +2289,14 @@ bool TypeChecker::isInsideUnavailableDeclaration(
                                   IsUnavailable);
 }
 
-/// Returns true if the reference is lexically contained in a declaration
-/// that is deprecated on all deployment targets.
-static bool isInsideDeprecatedDeclaration(SourceRange ReferenceRange,
-                                          const DeclContext *ReferenceDC,
-                                          TypeChecker &TC) {
+bool TypeChecker::isInsideDeprecatedDeclaration(SourceRange ReferenceRange,
+                                                const DeclContext *ReferenceDC){
   std::function<bool(const Decl *)> IsDeprecated = [](const Decl *D) {
     return D->getAttrs().getDeprecated(D->getASTContext());
   };
 
-  return someEnclosingDeclMatches(ReferenceRange, ReferenceDC, TC,
+  return someEnclosingDeclMatches(ReferenceRange, ReferenceDC, *this,
                                   IsDeprecated);
-}
-
-void TypeChecker::diagnoseDeprecated(SourceRange ReferenceRange,
-                                     const DeclContext *ReferenceDC,
-                                     const AvailableAttr *Attr,
-                                     DeclName Name,
-                   std::function<void(InFlightDiagnostic&)> extraInfoHandler) {
-  // We match the behavior of clang to not report deprecation warnings
-  // inside declarations that are themselves deprecated on all deployment
-  // targets.
-  if (isInsideDeprecatedDeclaration(ReferenceRange, ReferenceDC, *this)) {
-    return;
-  }
-
-  if (!Context.LangOpts.DisableAvailabilityChecking) {
-    AvailabilityContext RunningOSVersions =
-        overApproximateAvailabilityAtLocation(ReferenceRange.Start,ReferenceDC);
-    if (RunningOSVersions.isKnownUnreachable()) {
-      // Suppress a deprecation warning if the availability checking machinery
-      // thinks the reference program location will not execute on any
-      // deployment target for the current platform.
-      return;
-    }
-  }
-
-  StringRef Platform = Attr->prettyPlatformString();
-  clang::VersionTuple DeprecatedVersion;
-  if (Attr->Deprecated)
-    DeprecatedVersion = Attr->Deprecated.getValue();
-
-  if (Attr->Message.empty() && Attr->Rename.empty()) {
-    auto diagValue = std::move(
-      diagnose(ReferenceRange.Start, diag::availability_deprecated, Name,
-               Attr->hasPlatform(), Platform, Attr->Deprecated.hasValue(),
-               DeprecatedVersion)
-        .highlight(Attr->getRange()));
-    extraInfoHandler(diagValue);
-    return;
-  }
-
-  if (Attr->Message.empty()) {
-    auto diagValue = std::move(
-      diagnose(ReferenceRange.Start, diag::availability_deprecated_rename, Name,
-               Attr->hasPlatform(), Platform, Attr->Deprecated.hasValue(),
-               DeprecatedVersion, Attr->Rename)
-        .highlight(Attr->getRange()));
-    extraInfoHandler(diagValue);
-  } else {
-    EncodedDiagnosticMessage EncodedMessage(Attr->Message);
-    auto diagValue = std::move(
-      diagnose(ReferenceRange.Start, diag::availability_deprecated_msg, Name,
-               Attr->hasPlatform(), Platform, Attr->Deprecated.hasValue(),
-               DeprecatedVersion, EncodedMessage.Message)
-        .highlight(Attr->getRange()));
-    extraInfoHandler(diagValue);
-  }
-
-  if (!Attr->Rename.empty()) {
-    diagnose(ReferenceRange.Start, diag::note_deprecated_rename, Attr->Rename)
-      .fixItReplace(ReferenceRange, Attr->Rename);
-  }
 }
 
 // checkForForbiddenPrefix is for testing purposes.

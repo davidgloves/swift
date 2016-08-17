@@ -27,7 +27,7 @@
 #include "swift/Subsystems.h"
 #include "swift/SILOptimizer/PassManager/Passes.h"
 // This is included only for createLazyResolver(). Move to different header ?
-#include "swift/Sema/CodeCompletionTypeChecking.h"
+#include "swift/Sema/IDETypeChecking.h"
 
 #include "llvm/ADT/FoldingSet.h"
 #include "llvm/Support/FileSystem.h"
@@ -208,6 +208,10 @@ namespace SourceKit {
 
   EditorDiagConsumer &ASTUnit::getEditorDiagConsumer() const {
     return Impl.CollectDiagConsumer;
+  }
+
+  void ASTUnit::performAsync(std::function<void()> Fn) {
+    Impl.Queue.dispatch(std::move(Fn));
   }
 }
 

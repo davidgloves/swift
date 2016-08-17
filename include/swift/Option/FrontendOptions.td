@@ -73,6 +73,9 @@ def disable_objc_interop :
   Flag<["-"], "disable-objc-interop">,
   HelpText<"Disable Objective-C interop code generation and config directives">;
 
+def enable_swiftcall : Flag<["-"], "enable-swiftcall">,
+  HelpText<"Enable the use of LLVM swiftcall support">;
+
 def enable_objc_attr_requires_foundation_module :
   Flag<["-"], "enable-objc-attr-requires-foundation-module">,
   HelpText<"Enable requiring uses of @objc to require importing the "
@@ -91,6 +94,10 @@ def disable_testable_attr_requires_testable_module :
   Flag<["-"], "disable-testable-attr-requires-testable-module">,
   HelpText<"Disable checking of @testable">;
 
+def suppress_argument_labels_in_types :
+  Flag<["-"], "suppress-argument-labels-in-types">,
+  HelpText<"SE-0111: Suppress argument labels in types">;
+
 def enable_target_os_checking :
   Flag<["-"], "enable-target-os-checking">,
   HelpText<"Enable checking the target OS of serialized modules">;
@@ -104,6 +111,9 @@ def print_clang_stats : Flag<["-"], "print-clang-stats">,
 
 def serialize_debugging_options : Flag<["-"], "serialize-debugging-options">,
   HelpText<"Always serialize options for debugging (default: only for apps)">;
+
+def autolink_library : Separate<["-"], "autolink-library">,
+  HelpText<"Add dependent library">, Flags<[FrontendOption]>;
 
 } // end let Flags = [FrontendOption, NoDriverOption]
 
@@ -172,6 +182,9 @@ def disable_diagnostic_passes : Flag<["-"], "disable-diagnostic-passes">,
 def disable_llvm_optzns : Flag<["-"], "disable-llvm-optzns">,
   HelpText<"Don't run LLVM optimization passes">;
 
+def disable_sil_perf_optzns : Flag<["-"], "disable-sil-perf-optzns">,
+  HelpText<"Don't run SIL performance optimization passes">;
+
 def disable_llvm_arc_opts : Flag<["-"], "disable-llvm-arc-opts">,
   HelpText<"Don't run LLVM ARC optimization passes.">;
 
@@ -187,11 +200,12 @@ def disable_llvm_value_names : Flag<["-"], "disable-llvm-value-names">,
 def enable_llvm_value_names : Flag<["-"], "enable-llvm-value-names">,
   HelpText<"Add names to local values in LLVM IR">;
 
-def strip_field_names : Flag<["-"], "strip-field-names">,
-  HelpText<"Strip field names from nominal type metadata">;
+def disable_reflection_metadata : Flag<["-"], "disable-reflection-metadata">,
+  HelpText<"Disable emission of reflection metadata for nominal types">;
 
-def strip_field_metadata : Flag<["-"], "strip-field-metadata">,
-  HelpText<"Strip all field metadata for nominal types">;
+def disable_reflection_names : Flag<["-"], "disable-reflection-names">,
+  HelpText<"Disable emission of names of stored properties and enum cases in"
+           "reflection metadata">;
 
 def stack_promotion_checks : Flag<["-"], "emit-stack-promotion-checks">,
   HelpText<"Emit runtime checks for correct stack promotion of objects.">;
@@ -209,28 +223,39 @@ def dump_clang_diagnostics : Flag<["-"], "dump-clang-diagnostics">,
 def emit_verbose_sil : Flag<["-"], "emit-verbose-sil">,
   HelpText<"Emit locations during SIL emission">;
 
-def enable_experimental_patterns : Flag<["-"], "enable-experimental-patterns">,
-  HelpText<"Enable experimental 'switch' pattern matching features">;
+def enable_experimental_property_behaviors :
+  Flag<["-"], "enable-experimental-property-behaviors">,
+  HelpText<"Enable experimental property behaviors">;
+
+def enable_experimental_nested_generic_types :
+  Flag<["-"], "enable-experimental-nested-generic-types">,
+  HelpText<"Enable experimental support for nested generic types">;
+
+def enable_experimental_collection_casts :
+  Flag<["-"], "enable-experimental-collection-casts">,
+  HelpText<"Enable experimental support for general collection casting">;
 
 def disable_availability_checking : Flag<["-"],
   "disable-availability-checking">,
   HelpText<"Disable checking for potentially unavailable APIs">;
 
-def enable_omit_needless_words :
-  Flag<["-"], "enable-omit-needless-words">,
-  HelpText<"Omit needless words when importing Objective-C names">;
+def enable_infer_import_as_member :
+  Flag<["-"], "enable-infer-import-as-member">,
+  HelpText<"Infer when a global could be imported as a member">;
 
-def enable_infer_default_arguments :
-  Flag<["-"], "enable-infer-default-arguments">,
-  HelpText<"Infer default arguments for imported parameters">;
-
-def enable_swift_name_lookup_tables :
-  Flag<["-"], "enable-swift-name-lookup-tables">,
-  HelpText<"Enable Swift name lookup tables in the Clang importer">;
+def enable_swift_newtype :
+  Flag<["-"], "enable-swift-newtype">,
+  HelpText<"Enable the swift_newtype attribute">;
 
 def swift3_migration :
   Flag<["-"], "swift3-migration">,
   HelpText<"Enable Fix-It based migration aids for Swift 3">;
+
+def warn_long_function_bodies : Separate<["-"], "warn-long-function-bodies">,
+  MetaVarName<"<n>">,
+  HelpText<"Warns when type-checking a function takes longer than <n> ms">;
+def warn_long_function_bodies_EQ : Joined<["-"], "warn-long-function-bodies=">,
+  Alias<warn_long_function_bodies>;
 
 def warn_omit_needless_words :
   Flag<["-"], "Womit-needless-words">,
@@ -281,6 +306,17 @@ def print_inst_counts : Flag<["-"], "print-inst-counts">,
   HelpText<"Before IRGen, count all the various SIL instructions. Must be used "
            "in conjunction with -print-stats.">;
 
+def debug_on_sil : Flag<["-"], "gsil">,
+  HelpText<"Write the SIL into a file and generate debug-info to debug on SIL "
+           " level.">;
+
+def print_llvm_inline_tree : Flag<["-"], "print-llvm-inline-tree">,
+  HelpText<"Print the LLVM inline tree.">;
+
+def disable_incremental_llvm_codegeneration :
+  Flag<["-"], "disable-incremental-llvm-codegen">,
+       HelpText<"Disable incremental llvm code generation.">;
+
 def emit_sorted_sil : Flag<["-"], "emit-sorted-sil">,
   HelpText<"When printing SIL, print out all sil entities sorted by name to "
            "ease diffing">;
@@ -307,7 +343,13 @@ def dump_api_path : Separate<["-"], "dump-api-path">,
   HelpText<"The path to output swift interface files for the compiled source files">;
 
 def enable_resilience : Flag<["-"], "enable-resilience">,
-   HelpText<"Compile the library with resilient interfaces for all "
-            "public declarations">;
+   HelpText<"Compile the module to export resilient interfaces for all "
+            "public declarations by default">;
+
+def group_info_path : Separate<["-"], "group-info-path">,
+  HelpText<"The path to collect the group information of the compiled module">;
+
+def enable_id_as_any: Flag<["-"], "enable-id-as-any">,
+  HelpText<"Enable importing ObjC 'id' as Swift 'Any' type">;
 
 } // end let Flags = [FrontendOption, NoDriverOption, HelpHidden]

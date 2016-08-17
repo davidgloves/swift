@@ -5,13 +5,6 @@
 
 import StdlibUnittest
 
-// Also import modules which are used by StdlibUnittest internally. This
-// workaround is needed to link all required libraries in case we compile
-// StdlibUnittest with -sil-serialize-all.
-import SwiftPrivate
-#if _runtime(_ObjC)
-import ObjectiveC
-#endif
 
 import Foundation
 
@@ -23,6 +16,14 @@ tests.test("copy construction") {
   expectEqual(expected, x as! Dictionary)
   let y = NSMutableDictionary(dictionary: expected as NSDictionary)
   expectEqual(expected, y as NSDictionary as! Dictionary)
+}
+// rdar://problem/27875914
+tests.test("subscript with Any") {
+  let d = NSMutableDictionary()
+  d["k"] = "@this is how the world ends"
+  expectEqual((d["k"]! as AnyObject).characterAtIndex(0), 0x40)
+  d["k"] = nil
+  expectTrue(d["k"] == nil)
 }
 
 runAllTests()

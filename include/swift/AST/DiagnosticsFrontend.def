@@ -52,6 +52,19 @@ ERROR(error_unsupported_target_os, none,
 ERROR(error_unsupported_target_arch, none,
   "unsupported target architecture: '%0'", (StringRef))
 
+ERROR(error_unsupported_opt_for_target, none,
+  "unsupported option '%0' for target '%1'", (StringRef, StringRef))
+
+ERROR(error_argument_not_allowed_with, none,
+  "argument '%0' is not allowed with '%1'", (StringRef, StringRef))
+
+ERROR(error_option_requires_sanitizer, none,
+  "option '%0' requires a sanitizer to be enabled. Use -sanitize= to enable a"
+  " sanitizer", (StringRef))
+
+ERROR(error_option_missing_required_argument, none,
+  "option '%0' is missing a required argument (%1)", (StringRef, StringRef))
+
 ERROR(cannot_open_file,none,
   "cannot open file '%0' (%1)", (StringRef, StringRef))
 ERROR(cannot_open_serialized_file,none,
@@ -67,6 +80,8 @@ ERROR(error_unknown_arg,none,
   "unknown argument: '%0'", (StringRef))
 ERROR(error_invalid_arg_value,none,
   "invalid value '%1' in '%0'", (StringRef, StringRef))
+ERROR(error_unsupported_option_argument,none,
+  "unsupported argument '%1' to option '%0'", (StringRef, StringRef))
 ERROR(error_immediate_mode_missing_stdlib,none,
   "could not load the swift standard library", ())
 ERROR(error_immediate_mode_missing_library,none,
@@ -120,6 +135,10 @@ ERROR(error_implicit_output_file_is_directory,none,
   "the implicit output file '%0' is a directory; explicitly specify a filename "
   "using -o", (StringRef))
 
+ERROR(error_primary_file_not_found,none,
+      "primary file '%0' was not found in file list '%1'",
+      (StringRef, StringRef))
+
 ERROR(repl_must_be_initialized,none,
       "variables currently must have an initial value when entered at the "
       "top level of the REPL", ())
@@ -132,6 +151,12 @@ ERROR(verify_encountered_fatal,none,
 
 ERROR(error_parse_input_file,none,
   "error parsing input file '%0' (%1)", (StringRef, StringRef))
+
+ERROR(error_formatting_multiple_file_ranges,none,
+  "file ranges don't support multiple input files", ())
+
+ERROR(error_formatting_invalid_range,none,
+  "file range is invalid", ())
 
 #ifndef DIAG_NO_UNDEF
 # if defined(DIAG)

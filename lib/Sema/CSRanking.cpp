@@ -25,7 +25,7 @@ using namespace constraints;
 // Statistics
 //===----------------------------------------------------------------------===//
 #define DEBUG_TYPE "Constraint solver overall"
-STATISTIC(NumDiscardedSolutions, "# of solutions discarded");
+STATISTIC(NumDiscardedSolutions, "Number of solutions discarded");
 
 void ConstraintSystem::increaseScore(ScoreKind kind) {
   unsigned index = static_cast<unsigned>(kind);
@@ -118,7 +118,6 @@ static Type stripInitializers(Type origType) {
                for (const auto &field : tupleTy->getElements()) {
                  fields.push_back(TupleTypeElt(field.getType(),
                                                field.getName(),
-                                               DefaultArgumentKind::None,
                                                field.isVararg()));
                                                
                }
@@ -317,7 +316,7 @@ static Type addCurriedSelfType(ASTContext &ctx, Type type, DeclContext *dc) {
   if (!dc->isTypeContext())
     return type;
 
-  auto nominal = dc->isNominalTypeOrNominalTypeExtensionContext();
+  auto nominal = dc->getAsNominalTypeOrNominalTypeExtensionContext();
   auto selfTy = nominal->getInterfaceType()->castTo<MetatypeType>()
                   ->getInstanceType();
   if (auto sig = nominal->getGenericSignatureOfContext())
@@ -424,13 +423,13 @@ static bool hasEmptyExistentialParameterMismatch(ValueDecl *decl1,
 static bool isProtocolExtensionAsSpecializedAs(TypeChecker &tc,
                                                DeclContext *dc1,
                                                DeclContext *dc2) {
-  assert(dc1->isProtocolExtensionContext());
-  assert(dc2->isProtocolExtensionContext());
+  assert(dc1->getAsProtocolExtensionContext());
+  assert(dc2->getAsProtocolExtensionContext());
 
   // If one of the protocols being extended inherits the other, prefer the
   // more specialized protocol.
-  auto proto1 = dc1->isProtocolExtensionContext();
-  auto proto2 = dc2->isProtocolExtensionContext();
+  auto proto1 = dc1->getAsProtocolExtensionContext();
+  auto proto2 = dc2->getAsProtocolExtensionContext();
   if (proto1 != proto2) {
     if (proto1->inheritsFrom(proto2))
       return true;
@@ -450,8 +449,8 @@ static bool isProtocolExtensionAsSpecializedAs(TypeChecker &tc,
   // the second protocol extension.
   ConstraintSystem cs(tc, dc1, None);
   llvm::DenseMap<CanType, TypeVariableType *> replacements;
-  cs.openGeneric(dc2, sig2->getGenericParams(), sig2->getRequirements(),
-                 false, dc2->getGenericTypeContextDepth(),
+  cs.openGeneric(dc2, dc2, sig2,
+                 /*skipProtocolSelfConstraint=*/false,
                  ConstraintLocatorBuilder(nullptr),
                  replacements);
 
@@ -467,19 +466,6 @@ static bool isProtocolExtensionAsSpecializedAs(TypeChecker &tc,
   // Solve the system. If the first extension is at least as specialized as the
   // second, we're done.
   return cs.solveSingle().hasValue();
-}
-
-/// Count the number of default arguments in the primary clause.
-static unsigned countDefaultArguments(AbstractFunctionDecl *func) {
-  auto paramList = func->getParameterList(func->getImplicitSelfDecl() != 0);
-
-  unsigned count = 0;
-  for (auto elt : *paramList) {
-    if (elt->isDefaultArgument())
-      ++count;
-  }
-
-  return count;
 }
 
 /// \brief Determine whether the first declaration is as "specialized" as
@@ -529,9 +515,9 @@ static bool isDeclAsSpecializedAs(TypeChecker &tc, DeclContext *dc,
 
       // Members of protocol extensions have special overloading rules.
       ProtocolDecl *inProtocolExtension1 = decl1->getDeclContext()
-                                             ->isProtocolExtensionContext();
+                                             ->getAsProtocolExtensionContext();
       ProtocolDecl *inProtocolExtension2 = decl2->getDeclContext()
-                                             ->isProtocolExtensionContext();
+                                             ->getAsProtocolExtensionContext();
       if (inProtocolExtension1 && inProtocolExtension2) {
         // Both members are in protocol extensions.
         // Determine whether the 'Self' type from the first protocol extension
@@ -585,14 +571,35 @@ static bool isDeclAsSpecializedAs(TypeChecker &tc, DeclContext *dc,
       auto locator = cs.getConstraintLocator(nullptr);
       // FIXME: Locator when anchored on a declaration.
       // Get the type of a reference to the second declaration.
-      Type openedType2 = cs.openType(type2, locator,
-                                     decl2->getInnermostDeclContext());
+      llvm::DenseMap<CanType, TypeVariableType *> unused;
+      Type openedType2;
+      if (auto *funcType = type2->getAs<AnyFunctionType>()) {
+        openedType2 = cs.openFunctionType(
+            funcType, /*numArgumentLabelsToRemove=*/0, locator,
+            /*replacements=*/unused,
+            decl2->getInnermostDeclContext(),
+            decl2->getDeclContext(),
+            /*skipProtocolSelfConstraint=*/false);
+      } else {
+        openedType2 = cs.openType(type2, locator, unused);
+      }
 
       // Get the type of a reference to the first declaration, swapping in
       // archetypes for the dependent types.
       llvm::DenseMap<CanType, TypeVariableType *> replacements;
       auto dc1 = decl1->getInnermostDeclContext();
-      Type openedType1 = cs.openType(type1, locator, replacements, dc1);
+      Type openedType1;
+      if (auto *funcType = type1->getAs<AnyFunctionType>()) {
+        openedType1 = cs.openFunctionType(
+            funcType, /*numArgumentLabelsToRemove=*/0, locator,
+            replacements,
+            dc1,
+            decl1->getDeclContext(),
+            /*skipProtocolSelfConstraint=*/false);
+      } else {
+        openedType1 = cs.openType(type1, locator, replacements);
+      }
+
       for (const auto &replacement : replacements) {
         if (auto mapped = 
                   ArchetypeBuilder::mapTypeIntoContext(dc1,
@@ -638,14 +645,21 @@ static bool isDeclAsSpecializedAs(TypeChecker &tc, DeclContext *dc,
         break;
 
       case SelfTypeRelationship::ConformsTo:
-        cs.addConstraint(ConstraintKind::ConformsTo, selfTy1, selfTy2, locator);
+        cs.addConstraint(ConstraintKind::ConformsTo, selfTy1,
+                         cast<ProtocolDecl>(decl2->getDeclContext())
+                           ->getDeclaredType(),
+                         locator);
         break;
 
       case SelfTypeRelationship::ConformedToBy:
-        cs.addConstraint(ConstraintKind::ConformsTo, selfTy2, selfTy1, locator);
+        cs.addConstraint(ConstraintKind::ConformsTo, selfTy2,
+                         cast<ProtocolDecl>(decl1->getDeclContext())
+                           ->getDeclaredType(),
+                         locator);
         break;
       }
 
+      bool fewerEffectiveParameters = false;
       switch (checkKind) {
       case CheckAll:
         // Check whether the first type is a subtype of the second.
@@ -660,10 +674,48 @@ static bool isDeclAsSpecializedAs(TypeChecker &tc, DeclContext *dc,
         // second type's inputs, i.e., can we forward the arguments?
         auto funcTy1 = openedType1->castTo<FunctionType>();
         auto funcTy2 = openedType2->castTo<FunctionType>();
-        cs.addConstraint(ConstraintKind::Subtype,
-                         funcTy1->getInput(),
-                         funcTy2->getInput(),
-                         locator);
+        SmallVector<CallArgParam, 4> params1 =
+          decomposeParamType(funcTy1->getInput(), decl1,
+                             decl1->getDeclContext()->isTypeContext());
+        SmallVector<CallArgParam, 4> params2 =
+          decomposeParamType(funcTy2->getInput(), decl2,
+                             decl2->getDeclContext()->isTypeContext());
+
+        unsigned numParams1 = params1.size();
+        unsigned numParams2 = params2.size();
+        if (numParams1 > numParams2) return false;
+
+        for (unsigned i = 0; i != numParams2; ++i) {
+          // If there is no corresponding argument in the first
+          // parameter list...
+          if (i >= numParams1) {
+            // We need either a default argument or a variadic
+            // argument for the first declaration to be more
+            // specialized.
+            if (!params2[i].HasDefaultArgument && !params2[i].Variadic)
+              return false;
+
+            fewerEffectiveParameters = true;
+            continue;
+          }
+
+          // Labels must match.
+          if (params1[i].Label != params2[i].Label) return false;
+
+          // If one parameter is variadic and the other is not...
+          if (params1[i].Variadic != params2[i].Variadic) {
+            // If the first parameter is the variadic one, it's not
+            // more specialized.
+            if (params1[i].Variadic) return false;
+
+            fewerEffectiveParameters = true;
+          }
+
+          // Check whether the first parameter is a subtype of the second.
+          cs.addConstraint(ConstraintKind::Subtype,
+                           params1[i].Ty, params2[i].Ty, locator);
+        }
+
         break;
       }
       }
@@ -671,29 +723,13 @@ static bool isDeclAsSpecializedAs(TypeChecker &tc, DeclContext *dc,
       // Solve the system.
       auto solution = cs.solveSingle(FreeTypeVariableBinding::Allow);
 
-
       // Ban value-to-optional conversions.
       if (solution && solution->getFixedScore().Data[SK_ValueToOptional] == 0)
         return true;
 
-      // Between two imported functions/methods, prefer one with fewer
-      // defaulted arguments.
-      //
-      // FIXME: This is a total hack; we should be comparing based on the
-      // number of default arguments at were actually used. It's only safe to
-      // do this because the count will be zero except when under the
-      // experimental InferDefaultArguments mode of the Clang importer.
-      if (isa<AbstractFunctionDecl>(decl1) && 
-          isa<AbstractFunctionDecl>(decl2) &&
-          decl1->getClangDecl() && 
-          decl2->getClangDecl()) {
-        unsigned defArgsIn1
-          = countDefaultArguments(cast<AbstractFunctionDecl>(decl1));
-        unsigned defArgsIn2
-          = countDefaultArguments(cast<AbstractFunctionDecl>(decl2));
-        if (defArgsIn1 < defArgsIn2)
-          return true;
-      }
+      // If the first function has fewer effective parameters than the
+      // second, it is more specialized.
+      if (fewerEffectiveParameters) return true;
 
       return false;
     };
@@ -773,30 +809,23 @@ ConstraintSystem::compareSolutions(ConstraintSystem &cs,
     // protocol members during overload resolution.
     // FIXME: Along with the FIXME below, this is a hack to work around
     // problems with restating requirements in protocols.
+    identical = false;
     bool decl1InSubprotocol = false;
     bool decl2InSubprotocol = false;
-    if ((dc1->getContextKind() == DeclContextKind::NominalTypeDecl) &&
-        (dc1->getContextKind() == dc2->getContextKind())) {
-      
-      auto ntd1 = dyn_cast<NominalTypeDecl>(dc1);
-      auto ntd2 = dyn_cast<NominalTypeDecl>(dc2);
-      
-      identical = (ntd1 != ntd2) &&
-                  (ntd1->getKind() == DeclKind::Protocol) &&
-                  (ntd2->getKind() == DeclKind::Protocol);
+    if (dc1->getContextKind() == DeclContextKind::GenericTypeDecl &&
+        dc1->getContextKind() == dc2->getContextKind()) {
+      auto pd1 = dyn_cast<ProtocolDecl>(dc1);
+      auto pd2 = dyn_cast<ProtocolDecl>(dc2);
 
       // FIXME: This hack tells us to prefer members of subprotocols over
       // those of the protocols they inherit, if all else fails.
       // If we were properly handling overrides of protocol members when
       // requirements get restated, it would not be necessary.
-      if (identical) {
-        decl1InSubprotocol = cast<ProtocolDecl>(ntd1)->inheritsFrom(
-                               cast<ProtocolDecl>(ntd2));
-        decl2InSubprotocol = cast<ProtocolDecl>(ntd2)->inheritsFrom(
-                               cast<ProtocolDecl>(ntd1));
+      if (pd1 && pd2 && pd1 != pd2) {
+        identical = true;
+        decl1InSubprotocol = pd1->inheritsFrom(pd2);
+        decl2InSubprotocol = pd2->inheritsFrom(pd1);
       }
-    } else {
-      identical = false;
     }
     
     // If the kinds of overload choice don't match...

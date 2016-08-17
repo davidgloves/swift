@@ -89,6 +89,14 @@ Rename with a non-`stdlib` naming scheme.
 
 ## Reference counting
 
+### swift\_retainCount
+
+```
+@convention(c) (@unowned NativeObject) -> UInt
+```
+
+Returns a random number. Only used by allocation profiling tools.
+
 ### TODO
 
 ```
@@ -152,6 +160,7 @@ Rename with a non-`stdlib` naming scheme.
 000000000002b290 T _swift_isUniquelyReferencedOrPinned_nonNull_native
 000000000002af00 T _swift_isUniquelyReferenced_native
 000000000002aea0 T _swift_isUniquelyReferenced_nonNull_native
+00000000000????? T _swift_setDeallocating
 000000000001d280 T _swift_isDeallocating
 ```
 
@@ -242,7 +251,6 @@ process start and the function returns.
 should be implementable in the standard library now.
 
 ```
-0000000000003b60 T _swift_bridgeNonVerbatimFromObjectiveC
 0000000000003c80 T _swift_bridgeNonVerbatimFromObjectiveCConditional
 00000000000037e0 T _swift_bridgeNonVerbatimToObjectiveC
 00000000000039c0 T _swift_getBridgedNonVerbatimObjectiveCType

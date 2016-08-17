@@ -1,4 +1,4 @@
-// RUN: %target-run-simple-swift | FileCheck %s
+// RUN: %target-run-simple-swift | %FileCheck %s
 // REQUIRES: executable_test
 
 // REQUIRES: objc_interop
@@ -43,17 +43,17 @@ class Observer : NSObject {
 
   override init() { target = nil; super.init() }
 
-  func observeTarget(t: Target) {
+  func observeTarget(_ t: Target) {
     target = t
     target!.addObserver(self, forKeyPath:"objcValue",
-      options: [.New, .Old],
+      options: [.new, .old],
       context: nil)
   }
 
-  override func observeValueForKeyPath(path:String?,
-                               ofObject obj:AnyObject?,
-                                     change:Dictionary<String, AnyObject>?,
-                                    context:UnsafeMutablePointer<Void>) {
+  override func observeValue(forKeyPath:String?,
+                             of obj:Any?,
+                             change:Dictionary<NSKeyValueChangeKey, Any>?,
+                             context:UnsafeMutableRawPointer?) {
     target!.print()
   }
 }
@@ -86,11 +86,11 @@ class ObserverKVO : NSObject {
 
   override init() { target = nil; super.init() }
 
-  func observeTarget(target: Target) {
+  func observeTarget(_ target: Target) {
     self.target = target
     self.target!.addObserver(self,
        forKeyPath: "objcValue",
-       options: [.New, .Old],
+       options: [.new, .old],
        context: &kvoContext)
   }
   
@@ -99,10 +99,10 @@ class ObserverKVO : NSObject {
                                       context: &kvoContext)
   }
 
-  override func observeValueForKeyPath(path:String?,
-                                       ofObject obj:AnyObject?,
-                                       change:Dictionary<String, AnyObject>?,
-                                       context:UnsafeMutablePointer<Void>) {
+  override func observeValue(forKeyPath:String?,
+                             of obj:Any?,
+                             change:Dictionary<NSKeyValueChangeKey, Any>?,
+                             context:UnsafeMutableRawPointer?) {
     if context == &kvoContext {
       target!.print()
     }

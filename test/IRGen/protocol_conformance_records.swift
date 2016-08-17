@@ -1,5 +1,5 @@
-// RUN: %target-swift-frontend -primary-file %s -emit-ir -enable-resilience -enable-source-import -I %S/../Inputs | FileCheck %s
-// RUN: %target-swift-frontend %s -emit-ir -num-threads 8 -enable-resilience -enable-source-import -I %S/../Inputs | FileCheck %s
+// RUN: %target-swift-frontend -primary-file %s -emit-ir -enable-resilience -enable-source-import -I %S/../Inputs | %FileCheck %s
+// RUN: %target-swift-frontend %s -emit-ir -num-threads 8 -enable-resilience -enable-source-import -I %S/../Inputs | %FileCheck %s
 
 import resilient_struct
 
@@ -72,11 +72,11 @@ extension Int: Runcible {
 // -- protocol descriptor
 // CHECK:           [[RUNCIBLE]]
 // -- nominal type descriptor
-// CHECK:           @got._TMnV16resilient_struct4Size
+// CHECK:           @got._TMV16resilient_struct4Size
 // -- witness table
 // CHECK:           @_TWPurGV28protocol_conformance_records17NativeGenericTypex_S_8RuncibleS_
-// -- flags 0x04: unique nominal type descriptor
-// CHECK:           i32 4
+// -- flags 0x04: unique direct metadata
+// CHECK:           i32 1
 // CHECK:         }
 // CHECK:       ]
 

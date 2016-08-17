@@ -10,6 +10,9 @@
 //
 //===----------------------------------------------------------------------===//
 
+#ifndef SWIFT_BASIC_POINTERINTENUM_H
+#define SWIFT_BASIC_POINTERINTENUM_H
+
 #include "swift/Basic/LLVM.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/Support/PointerLikeTypeTraits.h"
@@ -76,7 +79,7 @@ struct PointerIntEnumIndexKindValue
 /// determine what cases are pointer and which are indices. For instance the one
 /// used by Projection in swift is:
 ///
-///    enum class NewProjectionKind : unsigned {
+///    enum class ProjectionKind : unsigned {
 ///      // PointerProjectionKinds
 ///      Upcast = 0,
 ///      RefCast = 1,
@@ -223,3 +226,5 @@ public:
 };
 
 } // end swift namespace
+
+#endif // SWIFT_BASIC_POINTERINTENUM_H

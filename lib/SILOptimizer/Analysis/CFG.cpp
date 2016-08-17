@@ -40,7 +40,7 @@ static bool isSafeNonExitTerminator(TermInst *TI) {
 static bool isTrapNoReturnFunction(ApplyInst *AI) {
   const char *fatalName =
       "_TFs18_fatalErrorMessageFTVs12StaticStringS_S_Su_T_";
-  auto *Fn = AI->getCalleeFunction();
+  auto *Fn = AI->getReferencedFunction();
 
   // We use endswith here since if we specialize fatal error we will always
   // prepend the specialization records to fatalName.
@@ -81,7 +81,7 @@ findAllNonFailureExitBBs(SILFunction *F,
     // non-failure exit BB. Add it to our list and continue.
     auto PrevIter = std::prev(SILBasicBlock::iterator(TI));
     if (auto *AI = dyn_cast<ApplyInst>(&*PrevIter)) {
-      if (AI->getSubstCalleeType()->isNoReturn() &&
+      if (AI->isCalleeNoReturn() &&
           !isTrapNoReturnFunction(AI)) {
         BBs.push_back(&BB);
         continue;

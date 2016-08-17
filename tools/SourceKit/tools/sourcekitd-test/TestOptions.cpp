@@ -61,15 +61,15 @@ static std::pair<unsigned, unsigned> parseLineCol(StringRef LineCol) {
   unsigned Line, Col;
   size_t ColonIdx = LineCol.find(':');
   if (ColonIdx == StringRef::npos) {
-    llvm::errs() << "wrong pos format, it should be '<line>:<column'\n";
+    llvm::errs() << "wrong pos format, it should be '<line>:<column>'\n";
     exit(1);
   }
   if (LineCol.substr(0, ColonIdx).getAsInteger(10, Line)) {
-    llvm::errs() << "wrong pos format, it should be '<line>:<column'\n";
+    llvm::errs() << "wrong pos format, it should be '<line>:<column>'\n";
     exit(1);
   }
   if (LineCol.substr(ColonIdx+1).getAsInteger(10, Col)) {
-    llvm::errs() << "wrong pos format, it should be '<line>:<column'\n";
+    llvm::errs() << "wrong pos format, it should be '<line>:<column>'\n";
     exit(1);
   }
 
@@ -102,6 +102,9 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
     switch (InputArg->getOption().getID()) {
     case OPT_req:
       Request = llvm::StringSwitch<SourceKitRequest>(InputArg->getValue())
+        .Case("version", SourceKitRequest::ProtocolVersion)
+        .Case("demangle", SourceKitRequest::DemangleNames)
+        .Case("mangle", SourceKitRequest::MangleSimpleClasses)
         .Case("index", SourceKitRequest::Index)
         .Case("complete", SourceKitRequest::CodeComplete)
         .Case("complete.open", SourceKitRequest::CodeCompleteOpen)
@@ -126,12 +129,15 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
         .Case("print-annotations", SourceKitRequest::PrintAnnotations)
         .Case("print-diags", SourceKitRequest::PrintDiags)
         .Case("extract-comment", SourceKitRequest::ExtractComment)
+        .Case("module-groups", SourceKitRequest::ModuleGroups)
         .Default(SourceKitRequest::None);
       if (Request == SourceKitRequest::None) {
         llvm::errs() << "error: invalid request, expected one of "
-            << "index/complete/cursor/related-idents/syntax-map/structure/"
-               "format/expand-placeholder/doc-info/sema/interface-gen/interface-gen-open/"
-               "find-usr/find-interface/open/edit/print-annotations/extract-comment\n";
+            << "version/demangle/mangle/index/complete/complete.open/complete.cursor/"
+               "complete.update/complete.cache.ondisk/complete.cache.setpopularapi/"
+               "cursor/related-idents/syntax-map/structure/format/expand-placeholder/"
+               "doc-info/sema/interface-gen/interface-gen-openfind-usr/find-interface/"
+               "open/edit/print-annotations/print-diags/extract-comment/module-groups\n";
         return true;
       }
       break;
@@ -173,6 +179,14 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
       ModuleName = InputArg->getValue();
       break;
 
+    case OPT_group_name:
+      ModuleGroupName = InputArg->getValue();
+      break;
+
+    case OPT_interested_usr:
+      InterestedUSR = InputArg->getValue();
+      break;
+
     case OPT_header:
       HeaderPath = InputArg->getValue();
       break;
@@ -202,17 +216,38 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
       CheckInterfaceIsASCII = true;
       break;
 
+    case OPT_dont_print_request:
+      PrintRequest = false;
+      break;
+
     case OPT_print_response_as_json:
       PrintResponseAsJSON = true;
+      break;
+
+    case OPT_print_raw_response:
+      PrintRawResponse = true;
       break;
 
     case OPT_INPUT:
       SourceFile = InputArg->getValue();
       SourceText = llvm::None;
+      Inputs.push_back(InputArg->getValue());
       break;
 
     case OPT_json_request_path:
       JsonRequestPath = InputArg->getValue();
+      break;
+
+    case OPT_simplified_demangling:
+      SimplifiedDemangling = true;
+      break;
+
+    case OPT_synthesized_extension:
+      SynthesizedExtensions = true;
+      break;
+
+    case OPT_async:
+      isAsyncRequest = true;
       break;
 
     case OPT_UNKNOWN:
@@ -220,6 +255,12 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
                    << InputArg->getAsString(ParsedArgs) << '\n';
       return true;
     }
+  }
+
+  if (Request == SourceKitRequest::InterfaceGenOpen && isAsyncRequest) {
+    llvm::errs()
+        << "error: cannot use -async with interface-gen-open request\n";
+    return true;
   }
 
   return false;

@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend %s -parse-as-library -O -emit-sil | FileCheck %s
+// RUN: %target-swift-frontend %s -parse-as-library -O -emit-sil | %FileCheck %s
 //
 // Test speculative devirtualization.
 
@@ -40,6 +40,6 @@ class Sub7 : Base {
 // CHECK-NOT: checked_cast_br
 // CHECK: %[[CM:[0-9]+]] = class_method %0 : $Base, #Base.foo!1 : (Base) -> () -> () , $@convention(method) (@guaranteed Base) -> ()
 // CHECK: apply %[[CM]](%0) : $@convention(method) (@guaranteed Base) -> ()
-public func testMaxNumSpeculativeTargets(b: Base) {
+public func testMaxNumSpeculativeTargets(_ b: Base) {
   b.foo()
 }

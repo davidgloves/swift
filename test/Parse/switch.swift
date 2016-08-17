@@ -64,7 +64,7 @@ case _ where x % 2 == 0,
   x = 1
 case var y where y % 2 == 0:
   x = y + 1
-case _ where 0: // expected-error {{type 'Int' does not conform to protocol 'BooleanType'}}
+case _ where 0: // expected-error {{'Int' is not convertible to 'Bool'}}
   x = 0
 default:
   x = 1
@@ -197,13 +197,13 @@ default:
 var t = (1, 2)
 
 switch t {
-case (var a, 2), (1, _): // expected-error {{'case' labels with multiple patterns cannot declare variables}}
+case (var a, 2), (1, _): // expected-error {{'a' must be bound in every pattern}}
   ()
 
-case (_, 2), (var a, _): // expected-error {{'case' labels with multiple patterns cannot declare variables}}
+case (_, 2), (var a, _): // expected-error {{'a' must be bound in every pattern}}
   ()
 
-case (var a, 2), (1, var b): // expected-error {{'case' labels with multiple patterns cannot declare variables}}
+case (var a, 2), (1, var b): // expected-error {{'a' must be bound in every pattern}} expected-error {{'b' must be bound in every pattern}}
   ()
 
 case (var a, 2): // expected-error {{'case' label in a 'switch' should have at least one executable statement}} {{17-17= break}}
@@ -221,16 +221,30 @@ case (1, var b):
 case (1, let b): // let bindings
   ()
 
-case (_, 2), (let a, _): // expected-error {{'case' labels with multiple patterns cannot declare variables}}
+case (_, 2), (let a, _): // expected-error {{'a' must be bound in every pattern}}
   ()
 
 // OK
 case (_, 2), (1, _):
   ()
+  
+case (_, var a), (_, var a):
+  ()
+  
+case (var a, var b), (var b, var a):
+  ()
 
 case (_, 2): // expected-error {{'case' label in a 'switch' should have at least one executable statement}} {{13-13= break}}
 case (1, _):
   ()
+}
+
+func patternVarUsedInAnotherPattern(x: Int) {
+  switch x {
+  case let a, // expected-error {{'a' must be bound in every pattern}}
+       a:
+    break
+  }
 }
 
 // Fallthroughs can't transfer control into a case label with bindings.
@@ -259,9 +273,36 @@ func enumElementSyntaxOnTuple() {
 
 // sr-176
 enum Whatever { case Thing }
-func f0(values: [Whatever]) {
+func f0(values: [Whatever]) { // expected-note {{did you mean 'values'?}}
     switch value { // expected-error {{use of unresolved identifier 'value'}}
     case .Thing: // Ok. Don't emit diagnostics about enum case not found in type <<error type>>.
         break
     }
+}
+
+// sr-720
+enum Whichever {
+  case Thing
+  static let title = "title"
+  static let alias: Whichever = .Thing
+}
+func f1(x: String, y: Whichever) {
+  switch x {
+    case Whichever.title: // Ok. Don't emit diagnostics for static member of enum.
+        break
+    case Whichever.buzz: // expected-error {{type 'Whichever' has no member 'buzz'}}
+        break
+    case Whichever.alias: // expected-error {{expression pattern of type 'Whichever' cannot match values of type 'String'}}
+        break
+    default:
+      break
+  }
+  switch y {
+    case Whichever.Thing: // Ok.
+        break
+    case Whichever.alias: // Ok. Don't emit diagnostics for static member of enum.
+        break
+    case Whichever.title: // expected-error {{expression pattern of type 'String' cannot match values of type 'Whichever'}}
+        break
+  }
 }

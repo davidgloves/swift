@@ -115,10 +115,8 @@ public:
       // An owned or 'in' parameter is passed in at +1. We can claim ownership
       // of the parameter and clean it up when it goes out of scope.
       return gen.emitManagedRValueWithCleanup(arg);
-
-    case ParameterConvention::Indirect_Out:
-      llvm_unreachable("should not emit @out parameters here");
     }
+    llvm_unreachable("bad parameter convention");
   }
 
   ManagedValue visitType(CanType t) {
@@ -226,9 +224,6 @@ struct ArgumentInitHelper {
   ArgumentInitHelper(SILGenFunction &gen, SILFunction &f)
     : gen(gen), f(f), initB(gen.B),
       parameters(f.getLoweredFunctionType()->getParameters()) {
-    // If we have an out parameter, skip it.
-    if (parameters.size() && parameters[0].isIndirectResult())
-      parameters = parameters.slice(1);
   }
 
   unsigned getNumArgs() const { return ArgNo; }
@@ -280,7 +275,8 @@ struct ArgumentInitHelper {
 
       // Set up a cleanup to write back to the inout.
       gen.Cleanups.pushCleanup<CleanupWriteBackToInOut>(vd, address);
-    } else if (vd->isLet()) {
+    } else {
+      assert(vd->isLet() && "expected parameter to be immutable!");
       // If the variable is immutable, we can bind the value as is.
       // Leave the cleanup on the argument, if any, in place to consume the
       // argument if we're responsible for it.
@@ -289,20 +285,6 @@ struct ArgumentInitHelper {
         gen.B.createDebugValueAddr(loc, argrv.getValue(), {vd->isLet(), ArgNo});
       else
         gen.B.createDebugValue(loc, argrv.getValue(), {vd->isLet(), ArgNo});
-    } else {
-      // If the variable is mutable, we need to copy or move the argument
-      // value to local mutable memory.
-
-      auto initVar = gen.emitLocalVariableWithCleanup(vd, false, ArgNo);
-
-      // If we have a cleanup on the value, we can move it into the variable.
-      if (argrv.hasCleanup())
-        argrv.forwardInto(gen, loc, initVar->getAddress());
-      // Otherwise, we need an independently-owned copy.
-      else
-        argrv.copyInto(gen, initVar->getAddress(), loc);
-
-      initVar->finishInitialization(gen);
     }
   }
 
@@ -312,8 +294,32 @@ struct ArgumentInitHelper {
       makeArgumentIntoBinding(PD->getType(), &*f.begin(), PD);
       return;
     }
-    
-    ManagedValue argrv = makeArgument(PD->getType(), &*f.begin(), PD);
+
+    emitAnonymousParam(PD->getType(), PD, PD);
+  }
+
+  void emitAnonymousParam(Type type, SILLocation paramLoc, ParamDecl *PD) {
+    assert(!PD || PD->getType()->isEqual(type));
+
+    // Allow non-materializable tuples to be bound to anonymous parameters.
+    if (!type->isMaterializable()) {
+      if (auto tupleType = type->getAs<TupleType>()) {
+        for (auto eltType : tupleType->getElementTypes()) {
+          emitAnonymousParam(eltType, paramLoc, nullptr);
+        }
+        return;
+      }
+    }
+
+    // A value bound to _ is unused and can be immediately released.
+    Scope discardScope(gen.Cleanups, CleanupLocation(PD));
+
+    // Manage the parameter.
+    ManagedValue argrv = makeArgument(type, &*f.begin(), paramLoc);
+
+    // Don't do anything else if we don't have a parameter.
+    if (!PD) return;
+
     // Emit debug information for the argument.
     SILLocation loc(PD);
     loc.markAsPrologue();
@@ -321,10 +327,6 @@ struct ArgumentInitHelper {
       gen.B.createDebugValueAddr(loc, argrv.getValue(), {PD->isLet(), ArgNo});
     else
       gen.B.createDebugValue(loc, argrv.getValue(), {PD->isLet(), ArgNo});
-
-    // A value bound to _ is unused and can be immediately released.
-    Scope discardScope(gen.Cleanups, CleanupLocation(PD));
-    // Popping the scope destroys the value.
   }
 };
 } // end anonymous namespace
@@ -355,6 +357,7 @@ void SILGenFunction::bindParametersForForwarding(const ParameterList *params,
 
 static void emitCaptureArguments(SILGenFunction &gen, CapturedValue capture,
                                  unsigned ArgNo) {
+
   auto *VD = capture.getDecl();
   auto type = VD->getType();
   SILLocation Loc(VD);
@@ -426,23 +429,52 @@ void SILGenFunction::emitProlog(AnyFunctionRef TheClosure,
   // Emit the capture argument variables. These are placed last because they
   // become the first curry level of the SIL function.
   auto captureInfo = SGM.Types.getLoweredLocalCaptures(TheClosure);
-  for (auto capture : captureInfo.getCaptures())
+  for (auto capture : captureInfo.getCaptures()) {
+    if (capture.isDynamicSelfMetadata()) {
+      auto selfMetatype = MetatypeType::get(
+          captureInfo.getDynamicSelfType()->getSelfType(),
+          MetatypeRepresentation::Thick)
+              ->getCanonicalType();
+      SILType ty = SILType::getPrimitiveObjectType(selfMetatype);
+      SILValue val = new (SGM.M) SILArgument(F.begin(), ty);
+      (void) val;
+
+      return;
+    }
+
     emitCaptureArguments(*this, capture, ++ArgNo);
+  }
+}
+
+static void emitIndirectResultParameters(SILGenFunction &gen, Type resultType,
+                                         DeclContext *DC) {
+  // Expand tuples.
+  if (auto tupleType = resultType->getAs<TupleType>()) {
+    for (auto eltType : tupleType->getElementTypes()) {
+      emitIndirectResultParameters(gen, eltType, DC);
+    }
+    return;
+  }
+
+  // If the return type is address-only, emit the indirect return argument.
+  const TypeLowering &resultTI = gen.getTypeLowering(resultType);
+  if (!resultTI.isReturnedIndirectly()) return;
+
+  auto &ctx = gen.getASTContext();
+  auto var = new (ctx) ParamDecl(/*IsLet*/ false, SourceLoc(), SourceLoc(),
+                                 ctx.getIdentifier("$return_value"), SourceLoc(),
+                                 ctx.getIdentifier("$return_value"), resultType,
+                                 DC);
+
+  auto arg =
+    new (gen.SGM.M) SILArgument(gen.F.begin(), resultTI.getLoweredType(), var);
+  (void) arg;
 }
 
 unsigned SILGenFunction::emitProlog(ArrayRef<ParameterList*> paramLists,
-                                    Type resultType, DeclContext *DeclCtx) {
-  // If the return type is address-only, emit the indirect return argument.
-  const TypeLowering &returnTI = getTypeLowering(resultType);
-  if (returnTI.isReturnedIndirectly()) {
-    auto &AC = getASTContext();
-    auto VD = new (AC) ParamDecl(/*IsLet*/ false, SourceLoc(), SourceLoc(),
-                                 AC.getIdentifier("$return_value"), SourceLoc(),
-                                 AC.getIdentifier("$return_value"), resultType,
-                                 DeclCtx);
-    IndirectReturnAddress = new (SGM.M)
-      SILArgument(F.begin(), returnTI.getLoweredType(), VD);
-  }
+                                    Type resultType, DeclContext *DC) {
+  // Create the indirect result parameters.
+  emitIndirectResultParameters(*this, resultType, DC);
 
   // Emit the argument variables in calling convention order.
   ArgumentInitHelper emitter(*this, F);

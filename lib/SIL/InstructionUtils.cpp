@@ -30,6 +30,15 @@ SILValue swift::getUnderlyingObject(SILValue V) {
   }
 }
 
+SILValue swift::getUnderlyingObjectStopAtMarkDependence(SILValue V) {
+  while (true) {
+    SILValue V2 = stripIndexingInsts(stripAddressProjections(stripCastsWithoutMarkDependence(V)));
+    if (V2 == V)
+      return V2;
+    V = V2;
+  }
+}
+
 static bool isRCIdentityPreservingCast(ValueKind Kind) {
   switch (Kind) {
     case ValueKind::UpcastInst:
@@ -88,6 +97,21 @@ SILValue swift::stripSinglePredecessorArgs(SILValue V) {
   }
 }
 
+SILValue swift::stripCastsWithoutMarkDependence(SILValue V) {
+  while (true) {
+    V = stripSinglePredecessorArgs(V);
+
+    auto K = V->getKind();
+    if (isRCIdentityPreservingCast(K) ||
+        K == ValueKind::UncheckedTrivialBitCastInst) {
+      V = cast<SILInstruction>(V)->getOperand(0);
+      continue;
+    }
+
+    return V;
+  }
+}
+
 SILValue swift::stripCasts(SILValue V) {
   while (true) {
     V = stripSinglePredecessorArgs(V);
@@ -135,7 +159,7 @@ SILValue swift::stripClassCasts(SILValue V) {
 SILValue swift::stripAddressProjections(SILValue V) {
   while (true) {
     V = stripSinglePredecessorArgs(V);
-    if (!NewProjection::isAddressProjection(V))
+    if (!Projection::isAddressProjection(V))
       return V;
     V = cast<SILInstruction>(V)->getOperand(0);
   }
@@ -144,7 +168,7 @@ SILValue swift::stripAddressProjections(SILValue V) {
 SILValue swift::stripUnaryAddressProjections(SILValue V) {
   while (true) {
     V = stripSinglePredecessorArgs(V);
-    if (!NewProjection::isAddressProjection(V))
+    if (!Projection::isAddressProjection(V))
       return V;
     auto *Inst = cast<SILInstruction>(V);
     if (Inst->getNumOperands() > 1)
@@ -156,7 +180,7 @@ SILValue swift::stripUnaryAddressProjections(SILValue V) {
 SILValue swift::stripValueProjections(SILValue V) {
   while (true) {
     V = stripSinglePredecessorArgs(V);
-    if (!NewProjection::isObjectProjection(V))
+    if (!Projection::isObjectProjection(V))
       return V;
     V = cast<SILInstruction>(V)->getOperand(0);
   }

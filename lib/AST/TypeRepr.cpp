@@ -22,6 +22,7 @@
 #include "swift/AST/Expr.h"
 #include "swift/AST/Module.h"
 #include "swift/AST/Types.h"
+#include "swift/Basic/Defer.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
@@ -94,6 +95,14 @@ void TypeRepr::print(raw_ostream &OS, const PrintOptions &Opts) const {
 }
 
 void TypeRepr::print(ASTPrinter &Printer, const PrintOptions &Opts) const {
+  // The type part of a NamedTypeRepr will get the callback.
+  if (!isa<NamedTypeRepr>(this))
+    Printer.printTypePre(TypeLoc(const_cast<TypeRepr *>(this)));
+  SWIFT_DEFER {
+    if (!isa<NamedTypeRepr>(this))
+      Printer.printTypePost(TypeLoc(const_cast<TypeRepr *>(this)));
+  };
+
   switch (getKind()) {
 #define TYPEREPR(CLASS, PARENT) \
   case TypeReprKind::CLASS: { \
@@ -189,7 +198,7 @@ TypeRepr *CloneVisitor::visitTupleTypeRepr(TupleTypeRepr *T) {
 
 TypeRepr *CloneVisitor::visitNamedTypeRepr(NamedTypeRepr *T) {
   return new (Ctx) NamedTypeRepr(T->getName(), visit(T->getTypeRepr()),
-                                 T->getNameLoc());
+                                 T->getNameLoc(), T->getUnderscoreLoc());
 }
 
 TypeRepr *CloneVisitor::visitProtocolCompositionTypeRepr(
@@ -201,8 +210,8 @@ TypeRepr *CloneVisitor::visitProtocolCompositionTypeRepr(
   }
 
   return new (Ctx) ProtocolCompositionTypeRepr(protocols,
-                                               T->getProtocolLoc(),
-                                               T->getAngleBrackets());
+                                               T->getStartLoc(),
+                                               T->getCompositionRange());
 }
 
 TypeRepr *CloneVisitor::visitMetatypeTypeRepr(MetatypeTypeRepr *T) {
@@ -255,24 +264,45 @@ void ErrorTypeRepr::printImpl(ASTPrinter &Printer,
 
 void AttributedTypeRepr::printImpl(ASTPrinter &Printer,
                                    const PrintOptions &Opts) const {
-  printAttrs(Printer);
-  Printer << " ";
+  printAttrs(Printer, Opts);
   printTypeRepr(Ty, Printer, Opts);
 }
 
 void AttributedTypeRepr::printAttrs(llvm::raw_ostream &OS) const {
   StreamPrinter Printer(OS);
-  printAttrs(Printer);
+  printAttrs(Printer, PrintOptions());
 }
 
-void AttributedTypeRepr::printAttrs(ASTPrinter &Printer) const {
+void AttributedTypeRepr::printAttrs(ASTPrinter &Printer,
+                                    const PrintOptions &Options) const {
   const TypeAttributes &Attrs = getAttrs();
-  if (Attrs.has(TAK_noreturn))     Printer << "@noreturn ";
-  if (Attrs.has(TAK_objc_block))   Printer << "@objc_block ";
-  if (Attrs.has(TAK_thin))         Printer << "@thin ";
-  if (Attrs.has(TAK_thick))        Printer << "@thick ";
-  if (Attrs.convention.hasValue()) {
-    Printer << "@convention(" << Attrs.convention.getValue() << ")";
+
+  auto hasAttr = [&](TypeAttrKind K) -> bool {
+    if (Options.excludeAttrKind(K))
+      return false;
+    return Attrs.has(K);
+  };
+
+  if (hasAttr(TAK_autoclosure)) {
+    Printer.printAttrName("@autoclosure");
+    Printer << " ";
+  }
+  if (hasAttr(TAK_escaping)) {
+    Printer.printAttrName("@escaping");
+    Printer << " ";
+  }
+
+  if (hasAttr(TAK_thin)) {
+    Printer.printAttrName("@thin");
+    Printer << " ";
+  }
+  if (hasAttr(TAK_thick)) {
+    Printer.printAttrName("@thick");
+    Printer << " ";
+  }
+  if (hasAttr(TAK_convention) && Attrs.convention.hasValue()) {
+    Printer.printAttrName("@convention");
+    Printer << "(" << Attrs.convention.getValue() << ") ";
   }
 }
 
@@ -308,7 +338,7 @@ void ComponentIdentTypeRepr::printImpl(ASTPrinter &Printer,
     if (auto MD = dyn_cast<ModuleDecl>(TD))
       Printer.printModuleRef(MD, getIdentifier());
     else
-      Printer.printTypeRef(TD, getIdentifier());
+      Printer.printTypeRef(Type(), TD, getIdentifier());
   } else {
     Printer.printName(getIdentifier());
   }
@@ -328,11 +358,17 @@ void CompoundIdentTypeRepr::printImpl(ASTPrinter &Printer,
 
 void FunctionTypeRepr::printImpl(ASTPrinter &Printer,
                                  const PrintOptions &Opts) const {
+  Printer.callPrintStructurePre(PrintStructureKind::FunctionType);
   printTypeRepr(ArgsTy, Printer, Opts);
-  if (throws())
-    Printer << " throws";
+  if (throws()) {
+    Printer << " ";
+    Printer.printKeyword("throws");
+  }
   Printer << " -> ";
+  Printer.callPrintStructurePre(PrintStructureKind::FunctionReturnType);
   printTypeRepr(RetTy, Printer, Opts);
+  Printer.printStructurePost(PrintStructureKind::FunctionReturnType);
+  Printer.printStructurePost(PrintStructureKind::FunctionType);
 }
 
 void ArrayTypeRepr::printImpl(ASTPrinter &Printer,
@@ -376,11 +412,16 @@ TupleTypeRepr *TupleTypeRepr::create(ASTContext &C,
 
 void TupleTypeRepr::printImpl(ASTPrinter &Printer,
                               const PrintOptions &Opts) const {
+  Printer.callPrintStructurePre(PrintStructureKind::TupleType);
+  SWIFT_DEFER { Printer.printStructurePost(PrintStructureKind::TupleType); };
+
   Printer << "(";
 
   for (unsigned i = 0, e = Elements.size(); i != e; ++i) {
     if (i) Printer << ", ";
+    Printer.callPrintStructurePre(PrintStructureKind::TupleElement);
     printTypeRepr(Elements[i], Printer, Opts);
+    Printer.printStructurePost(PrintStructureKind::TupleElement);
 
     if (hasEllipsis() && getEllipsisIndex() == i)
       Printer << "...";
@@ -390,9 +431,19 @@ void TupleTypeRepr::printImpl(ASTPrinter &Printer,
 
 void NamedTypeRepr::printImpl(ASTPrinter &Printer,
                               const PrintOptions &Opts) const {
-  if (!Id.empty()) {
-    Printer.printName(Id);
+  if (isNamedParameter()) {
+    // Printing empty Identifier is same as printing '_'.
+    Printer.printName(Identifier(), PrintNameContext::FunctionParameterExternal);
+    if (!Id.empty()) {
+      Printer << " ";
+      Printer.printName(Id, PrintNameContext::FunctionParameterLocal);
+    }
     Printer << ": ";
+  } else {
+    if (!Id.empty()) {
+      Printer.printName(Id, PrintNameContext::TupleElement);
+      Printer << ": ";
+    }
   }
   printTypeRepr(Ty, Printer, Opts);
 }
@@ -400,24 +451,26 @@ void NamedTypeRepr::printImpl(ASTPrinter &Printer,
 ProtocolCompositionTypeRepr *
 ProtocolCompositionTypeRepr::create(ASTContext &C,
                                     ArrayRef<IdentTypeRepr *> Protocols,
-                                    SourceLoc ProtocolLoc,
-                                    SourceRange AngleBrackets) {
+                                    SourceLoc FirstTypeLoc,
+                                    SourceRange CompositionRange) {
   return new (C) ProtocolCompositionTypeRepr(C.AllocateCopy(Protocols),
-                                             ProtocolLoc, AngleBrackets);
+                                             FirstTypeLoc, CompositionRange);
 }
 
 void ProtocolCompositionTypeRepr::printImpl(ASTPrinter &Printer,
                                             const PrintOptions &Opts) const {
-  Printer << "protocol<";
-  bool First = true;
-  for (auto Proto : Protocols) {
-    if (First)
-      First = false;
-    else
-      Printer << ", ";
-    printTypeRepr(Proto, Printer, Opts);
+  if (Protocols.empty()) {
+    Printer << "Any";
+  } else {
+    bool First = true;
+    for (auto Proto : Protocols) {
+      if (First)
+        First = false;
+      else
+        Printer << " & ";
+      printTypeRepr(Proto, Printer, Opts);
+    }
   }
-  Printer << ">";
 }
 
 void MetatypeTypeRepr::printImpl(ASTPrinter &Printer,
@@ -435,7 +488,8 @@ void ProtocolTypeRepr::printImpl(ASTPrinter &Printer,
 
 void InOutTypeRepr::printImpl(ASTPrinter &Printer,
                               const PrintOptions &Opts) const {
-  Printer << "inout ";
+  Printer.printKeyword("inout");
+  Printer << " ";
   printTypeRepr(Base, Printer, Opts);
 }
 

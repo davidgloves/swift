@@ -156,7 +156,7 @@ class MemoryToRegisters {
   SILBuilder B;
 
   /// \brief Check if the AllocStackInst \p ASI is only written into.
-  bool isWriteOnlyAllocation(AllocStackInst *ASI, bool Promoted = false);
+  bool isWriteOnlyAllocation(AllocStackInst *ASI);
 
   /// \brief Promote all of the AllocStacks in a single basic block in one
   /// linear scan. Note: This function deletes all of the users of the
@@ -242,8 +242,7 @@ static bool isCaptured(AllocStackInst *ASI, bool &inSingleBlock) {
 }
 
 /// Returns true if the AllocStack is only stored into.
-bool MemoryToRegisters::isWriteOnlyAllocation(AllocStackInst *ASI,
-                                              bool Promoted) {
+bool MemoryToRegisters::isWriteOnlyAllocation(AllocStackInst *ASI) {
   // For all users of the AllocStack:
   for (auto UI = ASI->use_begin(), E = ASI->use_end(); UI != E; ++UI) {
     SILInstruction *II = UI->getUser();
@@ -259,14 +258,8 @@ bool MemoryToRegisters::isWriteOnlyAllocation(AllocStackInst *ASI,
 
     // If we haven't already promoted the AllocStack, we may see
     // DebugValueAddr uses.
-    if (!Promoted && isa<DebugValueAddrInst>(II))
+    if (isa<DebugValueAddrInst>(II))
       continue;
-
-    // Destroys of loadable types can be rewritten as releases, so
-    // they are fine.
-    if (auto *DAI = dyn_cast<DestroyAddrInst>(II))
-      if (!Promoted && DAI->getOperand()->getType().isLoadable(DAI->getModule()))
-        continue;
 
     // Can't do anything else with it.
     DEBUG(llvm::dbgs() << "*** AllocStack has non-write use: " << *II);
@@ -319,19 +312,18 @@ static void collectLoads(SILInstruction *I, SmallVectorImpl<LoadInst *> &Loads) 
 
 
 static void replaceLoad(LoadInst *LI, SILValue val, AllocStackInst *ASI) {
-  ProjectionPath projections;
+  ProjectionPath projections(val->getType());
   SILValue op = LI->getOperand();
   while (op != ASI) {
     assert(isa<StructElementAddrInst>(op) || isa<TupleElementAddrInst>(op));
     SILInstruction *Inst = cast<SILInstruction>(op);
-    auto projection = Projection::addressProjectionForInstruction(Inst);
-    projections.push_back(projection.getValue());
+    projections.push_back(Projection(Inst));
     op = Inst->getOperand(0);
   }
   SILBuilder builder(LI);
   for (auto iter = projections.rbegin(); iter != projections.rend(); ++iter) {
     const Projection &projection = *iter;
-    val = projection.createValueProjection(builder, LI->getLoc(), val).get();
+    val = projection.createObjectProjection(builder, LI->getLoc(), val).get();
   }
   op = LI->getOperand();
   LI->replaceAllUsesWith(val);
@@ -569,7 +561,8 @@ StackAllocationPromoter::getLiveInValue(BlockSet &PhiBlocks,
     return BB->getBBArg(BB->getNumBBArg()-1);
   }
 
-  assert(DT->getNode(BB) && "Block is not in dominator tree!");
+  if (BB->pred_empty() || !DT->getNode(BB))
+    return SILUndef::get(ASI->getElementType(), ASI->getModule());
 
   // No phi for this value in this block means that the value flowing
   // out of the immediate dominator reaches here.
@@ -611,14 +604,10 @@ void StackAllocationPromoter::fixBranchesAndUses(BlockSet &PhiBlocks) {
       // examining is a value, replace it with undef. Either way, delete
       // the instruction and move on.
       SILBasicBlock *BB = LI->getParent();
-      if (BB->pred_empty() || !DT->getNode(BB)) {
-        Def = SILUndef::get(ASI->getElementType(), ASI->getModule());
-      } else {
-        Def = getLiveInValue(PhiBlocks, BB);
-      }
-      
+      Def = getLiveInValue(PhiBlocks, BB);
+
       DEBUG(llvm::dbgs() << "*** Replacing " << *LI << " with Def " << *Def);
-        
+
       // Replace the load with the definition that we found.
       replaceLoad(LI, Def, ASI);
       removedUser = true;
@@ -878,8 +867,7 @@ bool MemoryToRegisters::run() {
       StackAllocationPromoter(ASI, DT, DomTreeLevels, B).run();
 
       // Make sure that all of the allocations were promoted into registers.
-      assert(isWriteOnlyAllocation(ASI, /* Promoted =*/ true) &&
-             "Non-write uses left behind");
+      assert(isWriteOnlyAllocation(ASI) && "Non-write uses left behind");
       // ... and erase the allocation.
       eraseUsesOfInstruction(ASI);
 

@@ -26,6 +26,7 @@
 #include "swift/AST/Types.h"
 #include "swift/AST/TypeLoc.h"
 #include "swift/Basic/OptionSet.h"
+#include "llvm/Support/TrailingObjects.h"
 
 namespace swift {
   class ASTContext;
@@ -165,6 +166,9 @@ public:
     });
   }
 
+  /// Does this binding declare something that requires storage?
+  bool hasStorage() const;
+
   static bool classof(const Pattern *P) { return true; }
   
   //*** Allocation Routines ************************************************/
@@ -249,16 +253,11 @@ public:
 };
 
 /// A pattern consisting of a tuple of patterns.
-class TuplePattern : public Pattern {
+class TuplePattern final : public Pattern,
+    private llvm::TrailingObjects<TuplePattern, TuplePatternElt> {
+  friend TrailingObjects;
   SourceLoc LPLoc, RPLoc;
   // TuplePatternBits.NumElements
-
-  TuplePatternElt *getElementsBuffer() {
-    return reinterpret_cast<TuplePatternElt *>(this+1);
-  }
-  const TuplePatternElt *getElementsBuffer() const {
-    return reinterpret_cast<const TuplePatternElt *>(this + 1);
-  }
 
   TuplePattern(SourceLoc lp, unsigned numElements, SourceLoc rp,
                bool implicit)
@@ -285,14 +284,10 @@ public:
   }
 
   MutableArrayRef<TuplePatternElt> getElements() {
-    return getNumElements() == 0 ? MutableArrayRef<TuplePatternElt>() :
-                                   MutableArrayRef<TuplePatternElt>(getElementsBuffer(),
-                                                                    getNumElements());
+    return {getTrailingObjects<TuplePatternElt>(), getNumElements()};
   }
   ArrayRef<TuplePatternElt> getElements() const {
-    return getNumElements() == 0 ? ArrayRef<TuplePatternElt>() :
-                                   ArrayRef<TuplePatternElt>(getElementsBuffer(),
-                                                             getNumElements());
+    return {getTrailingObjects<TuplePatternElt>(), getNumElements()};
   }
 
   const TuplePatternElt &getElement(unsigned i) const {return getElements()[i];}
@@ -456,104 +451,6 @@ public:
     return P->getKind() == PatternKind::Is;
   }
 };
-
-  
-/// A pattern that matches a nominal type and destructures elements out of it.
-/// The match succeeds if the loaded property values all match their associated
-/// subpatterns.
-class NominalTypePattern : public Pattern {
-public:
-  /// A nominal type subpattern record.
-  class Element {
-    /// The location of the property name.
-    SourceLoc PropertyLoc;
-    /// The location of the colon.
-    SourceLoc ColonLoc;
-    /// The referenced property name.
-    Identifier PropertyName;
-    /// The referenced property.
-    VarDecl *Property;
-    /// The subpattern.
-    Pattern *SubPattern;
-  public:
-    Element(SourceLoc PropLoc, Identifier PropName, VarDecl *Prop,
-            SourceLoc ColonLoc,
-            Pattern *SubP)
-      : PropertyLoc(PropLoc), ColonLoc(ColonLoc),
-        PropertyName(PropName), Property(Prop),
-        SubPattern(SubP)
-    {}
-    
-    SourceLoc getPropertyLoc() const { return PropertyLoc; }
-    SourceLoc getColonLoc() const { return ColonLoc; }
-    
-    VarDecl *getProperty() const { return Property; }
-    void setProperty(VarDecl *v) { Property = v; }
-    
-    Identifier getPropertyName() const { return PropertyName; }
-    
-    const Pattern *getSubPattern() const { return SubPattern; }
-    Pattern *getSubPattern() { return SubPattern; }
-    void setSubPattern(Pattern *p) { SubPattern = p; }
-  };
-  
-private:
-  TypeLoc CastType;
-  SourceLoc LParenLoc, RParenLoc;
-  
-  unsigned NumElements;
-  
-  Element *getElementStorage() {
-    return reinterpret_cast<Element *>(this + 1);
-  }
-  const Element *getElementStorage() const {
-    return reinterpret_cast<const Element *>(this + 1);
-  }
-  
-  NominalTypePattern(TypeLoc CastTy, SourceLoc LParenLoc,
-                     ArrayRef<Element> Elements,
-                     SourceLoc RParenLoc,
-                     Optional<bool> implicit = None)
-    : Pattern(PatternKind::NominalType), CastType(CastTy),
-      LParenLoc(LParenLoc), RParenLoc(RParenLoc),
-      NumElements(Elements.size())
-  {
-    if (implicit.hasValue() ? *implicit : !CastTy.hasLocation())
-      setImplicit();
-    static_assert(IsTriviallyCopyable<Element>::value,
-                  "assuming Element is trivially copyable");
-    memcpy(getElementStorage(), Elements.begin(),
-           Elements.size() * sizeof(Element));
-  }
-  
-public:
-  static NominalTypePattern *create(TypeLoc CastTy, SourceLoc LParenLoc,
-                                    ArrayRef<Element> Elements,
-                                    SourceLoc RParenLoc,
-                                    ASTContext &C,
-                                    Optional<bool> implicit = None);
-
-  TypeLoc &getCastTypeLoc() { return CastType; }
-  TypeLoc getCastTypeLoc() const { return CastType; }
-  
-  ArrayRef<Element> getElements() const {
-    return {getElementStorage(), NumElements};
-  }
-  MutableArrayRef<Element> getMutableElements() {
-    return {getElementStorage(), NumElements};
-  }
-  
-  SourceLoc getLoc() const { return CastType.getSourceRange().Start; }
-  SourceLoc getLParenLoc() const { return LParenLoc; }
-  SourceLoc getRParenLoc() const { return RParenLoc; }
-  SourceRange getSourceRange() const {
-    return {getLoc(), RParenLoc};
-  }
-  
-  static bool classof(const Pattern *P) {
-    return P->getKind() == PatternKind::NominalType;
-  }
-};
   
 /// A pattern that matches an enum case. If the enum value is in the matching
 /// case, then the value is extracted. If there is a subpattern, it is then
@@ -573,7 +470,7 @@ public:
     : Pattern(PatternKind::EnumElement),
       ParentType(ParentType), DotLoc(DotLoc), NameLoc(NameLoc), Name(Name),
       ElementDecl(Element), SubPattern(SubPattern) {
-    if (Implicit.hasValue() ? *Implicit : !ParentType.hasLocation())
+    if (Implicit.hasValue() && *Implicit)
       setImplicit();
   }
 
@@ -585,6 +482,10 @@ public:
   
   Pattern *getSubPattern() {
     return SubPattern;
+  }
+
+  bool isParentTypeImplicit() {
+    return !ParentType.hasLocation();
   }
   
   void setSubPattern(Pattern *p) { SubPattern = p; }

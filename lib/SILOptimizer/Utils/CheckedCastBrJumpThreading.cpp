@@ -95,7 +95,7 @@ class CheckedCastBrJumpThreading {
                                CheckedCastBranchInst *DomCCBI);
   bool checkCloningConstraints();
 
-  void classifyPredecessor( SILBasicBlock *Pred, bool SuccessDominates,
+  void classifyPredecessor(SILBasicBlock *Pred, bool SuccessDominates,
                            bool FailureDominates);
 
   SILValue isArgValueEquivalentToCondition(SILValue Value,
@@ -371,7 +371,7 @@ areEquivalentConditionsAlongSomePaths(CheckedCastBranchInst *DomCCBI,
   // Incoming values for the BBArg.
   SmallVector<SILValue, 4> IncomingValues;
 
-  if (ArgBB != ArgBB->getParent()->begin() &&
+  if (ArgBB->getIterator() != ArgBB->getParent()->begin() &&
       (!Arg->getIncomingValues(IncomingValues) || IncomingValues.empty()))
     return false;
 
@@ -382,6 +382,11 @@ areEquivalentConditionsAlongSomePaths(CheckedCastBranchInst *DomCCBI,
     // ArgBB is not the entry block and has predecessors.
     unsigned idx = 0;
     for (auto *PredBB : ArgBB->getPreds()) {
+
+      // We must avoid that we are going to change a block twice.
+      if (BlocksToEdit.count(PredBB) != 0)
+        return false;
+
       auto IncomingValue = IncomingValues[idx];
       SILValue ReachingValue = isArgValueEquivalentToCondition(
           IncomingValue, DomBB, DomCondition, DT);

@@ -14,7 +14,6 @@
 #include "swift/SILOptimizer/PassManager/Passes.h"
 #include "swift/SILOptimizer/PassManager/Transforms.h"
 #include "swift/SIL/PatternMatch.h"
-#include "swift/SIL/Projection.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILVisitor.h"
 #include "swift/SILOptimizer/Utils/Local.h"
@@ -56,7 +55,7 @@ protected:
 
   llvm::SmallSetVector<SILFunction *, 16> Worklist;
 
-  llvm::SmallPtrSet<SILFunction *, 100> AliveFunctions;
+  llvm::SmallPtrSet<SILFunction *, 32> AliveFunctions;
 
   /// Checks is a function is alive, e.g. because it is visible externally.
   bool isAnchorFunction(SILFunction *F) {
@@ -203,12 +202,14 @@ protected:
     SILLinkage linkage;
     switch (accessibility) {
     case Accessibility::Private:
+    case Accessibility::FilePrivate:
       linkage = SILLinkage::Private;
       break;
     case Accessibility::Internal:
       linkage = SILLinkage::Hidden;
       break;
     case Accessibility::Public:
+    case Accessibility::Open:
       linkage = SILLinkage::Public;
       break;
     }
@@ -218,8 +219,7 @@ protected:
     // If a vtable or witness table (method) is only visible in another module
     // it can be accessed inside that module and we don't see this access.
     // We hit this case e.g. if a table is imported from the stdlib.
-    if (decl->getDeclContext()->getParentModule() !=
-        Module->getAssociatedContext()->getParentModule())
+    if (decl->getDeclContext()->getParentModule() != Module->getSwiftModule())
       return true;
 
     return false;
@@ -237,6 +237,11 @@ protected:
     for (SILFunction &F : *Module) {
       if (isAnchorFunction(&F)) {
         DEBUG(llvm::dbgs() << "  anchor function: " << F.getName() << "\n");
+        ensureAlive(&F);
+      }
+
+      if (!F.shouldOptimize()) {
+        DEBUG(llvm::dbgs() << "  anchor a no optimization function: " << F.getName() << "\n");
         ensureAlive(&F);
       }
     }
@@ -340,6 +345,21 @@ class DeadFunctionElimination : FunctionLivenessComputation {
           ensureAlive(mi, nullptr, nullptr);
       }
     }
+
+    // Check default witness methods.
+    for (SILDefaultWitnessTable &WT : Module->getDefaultWitnessTableList()) {
+      for (const SILDefaultWitnessTable::Entry &entry : WT.getEntries()) {
+        if (!entry.isValid())
+          continue;
+
+        SILFunction *F = entry.getWitness();
+        auto *fd = cast<AbstractFunctionDecl>(entry.getRequirement().getDecl());
+
+        MethodInfo *mi = getMethodInfo(fd);
+        addImplementingFunction(mi, F, nullptr);
+        ensureAlive(mi, nullptr, nullptr);
+      }
+    }
   }
 
   /// Removes all dead methods from vtables and witness tables.
@@ -395,8 +415,9 @@ public:
       if (!isAlive(F)) {
         DEBUG(llvm::dbgs() << "  erase dead function " << F->getName() << "\n");
         NumDeadFunc++;
+        DFEPass->invalidateAnalysisForDeadFunction(F,
+                                     SILAnalysis::InvalidationKind::Everything);
         Module->eraseFunction(F);
-        DFEPass->invalidateAnalysis(F, SILAnalysis::InvalidationKind::Everything);
       }
     }
   }
@@ -472,9 +493,6 @@ class ExternalFunctionDefinitionsElimination : FunctionLivenessComputation {
     Blocks.clear();
     assert(F->isExternalDeclaration() &&
            "Function should be an external declaration");
-    if (F->getRefCount() == 0)
-      F->getModule().eraseFunction(F);
-
     NumEliminatedExternalDefs++;
     return true;
   }
@@ -492,16 +510,16 @@ public:
     findAliveFunctions();
     // Get rid of definitions for all global functions that are not marked as
     // alive.
-    bool NeedUpdate = false;
     for (auto FI = Module->begin(), EI = Module->end(); FI != EI;) {
       SILFunction *F = &*FI;
       ++FI;
       // Do not remove bodies of any functions that are alive.
       if (!isAlive(F)) {
         if (tryToConvertExternalDefinitionIntoDeclaration(F)) {
-          NeedUpdate = true;
-          DFEPass->invalidateAnalysis(F,
+          DFEPass->invalidateAnalysisForDeadFunction(F,
                                     SILAnalysis::InvalidationKind::Everything);
+          if (F->getRefCount() == 0)
+            F->getModule().eraseFunction(F);
         }
       }
     }

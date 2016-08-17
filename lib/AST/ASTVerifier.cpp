@@ -520,8 +520,8 @@ struct ASTNodeBase {};
       case DeclContextKind::AbstractFunctionDecl:
         return cast<AbstractFunctionDecl>(dc)->getGenericParams();
 
-      case DeclContextKind::NominalTypeDecl:
-        return cast<NominalTypeDecl>(dc)->getGenericParams();
+      case DeclContextKind::GenericTypeDecl:
+        return cast<GenericTypeDecl>(dc)->getGenericParams();
 
       case DeclContextKind::ExtensionDecl:
         return cast<ExtensionDecl>(dc)->getGenericParams();
@@ -641,6 +641,24 @@ struct ASTNodeBase {};
       OptionalEvaluations.pop_back();
     }
 
+    // Register the OVEs in a collection upcast.
+    bool shouldVerify(CollectionUpcastConversionExpr *expr) {
+      if (!shouldVerify(cast<Expr>(expr)))
+        return false;
+
+      if (auto keyConversion = expr->getKeyConversion())
+        OpaqueValues[keyConversion.OrigValue] = 0;
+      if (auto valueConversion = expr->getValueConversion())
+        OpaqueValues[valueConversion.OrigValue] = 0;
+      return true;
+    }
+    void cleanup(CollectionUpcastConversionExpr *expr) {
+      if (auto keyConversion = expr->getKeyConversion())
+        OpaqueValues.erase(keyConversion.OrigValue);
+      if (auto valueConversion = expr->getValueConversion())
+        OpaqueValues.erase(valueConversion.OrigValue);
+    }
+
     /// Canonicalize the given DeclContext pointer, in terms of
     /// producing something that can be looked up in
     /// ClosureDiscriminators.
@@ -670,6 +688,21 @@ struct ASTNodeBase {};
 
       if (D->hasType())
         verifyChecked(D->getType());
+
+      if (D->hasAccessibility()) {
+        PrettyStackTraceDecl debugStack("verifying access", D);
+        if (D->getFormalAccessScope() == nullptr &&
+            D->getFormalAccess() < Accessibility::Public) {
+          Out << "non-public decl has no formal access scope\n";
+          D->dump(Out);
+          abort();
+        }
+        if (D->getEffectiveAccess() == Accessibility::Private) {
+          Out << "effective access should use 'fileprivate' for 'private'\n";
+          D->dump(Out);
+          abort();
+        }
+      }
 
       if (auto Overridden = D->getOverriddenDecl()) {
         if (D->getDeclContext() == Overridden->getDeclContext()) {
@@ -834,6 +867,39 @@ struct ASTNodeBase {};
       Type lhsTy = checkAssignDest(S->getDest());
       checkSameType(lhsTy, S->getSrc()->getType(), "assignment operands");
       verifyCheckedBase(S);
+    }
+    
+    void verifyChecked(EnumIsCaseExpr *E) {
+      auto nom = E->getSubExpr()->getType()->getAnyNominal();
+      if (!nom || !isa<EnumDecl>(nom)) {
+        Out << "enum_is_decl operand is not an enum: ";
+        E->getSubExpr()->getType().print(Out);
+        Out << '\n';
+        abort();
+      }
+      
+      if (nom != E->getEnumElement()->getParentEnum()) {
+        Out << "enum_is_decl case is not member of enum:\n";
+        Out << "  case: ";
+        E->getEnumElement()->print(Out);
+        Out << "\n  type: ";
+        E->getSubExpr()->getType().print(Out);
+        Out << '\n';
+        abort();
+      }
+    }
+
+    void verifyChecked(TupleExpr *E) {
+      const TupleType *exprTy = E->getType()->castTo<TupleType>();
+      for_each(exprTy->getElements().begin(), exprTy->getElements().end(),
+               E->getElements().begin(),
+               [this](const TupleTypeElt &field, const Expr *elt) {
+        checkTrivialSubtype(field.getType()->getUnlabeledType(Ctx),
+                            elt->getType()->getUnlabeledType(Ctx),
+                            "tuple and element");
+      });
+      // FIXME: Check all the variadic elements.
+      verifyCheckedBase(E);
     }
 
     void verifyChecked(InOutExpr *E) {
@@ -1033,7 +1099,7 @@ struct ASTNodeBase {};
       auto fromElement = E->getSubExpr()->getType()->getAnyPointerElementType();
       auto toElement = E->getType()->getAnyPointerElementType();
       
-      if (!fromElement && !toElement) {
+      if (!fromElement || !toElement) {
         Out << "PointerToPointer does not convert between pointer types:\n";
         E->print(Out);
         Out << "\n";
@@ -1111,7 +1177,7 @@ struct ASTNodeBase {};
         Out << "\n";
         abort();
       }
-      if (PTK != PTK_UnsafePointer) {
+      if (PTK != PTK_UnsafePointer && PTK != PTK_UnsafeRawPointer) {
         Out << "StringToPointer converts to non-const pointer:\n";
         E->print(Out);
         Out << "\n";
@@ -1146,6 +1212,33 @@ struct ASTNodeBase {};
       }
 
       checkTrivialSubtype(srcTy, destTy, "DerivedToBaseExpr");
+      verifyCheckedBase(E);
+    }
+
+    void verifyChecked(AnyHashableErasureExpr *E) {
+      auto anyHashableDecl = Ctx.getAnyHashableDecl();
+      if (!anyHashableDecl) {
+        Out << "AnyHashable declaration could not be found\n";
+        abort();
+      }
+
+      auto hashableDecl = Ctx.getProtocol(KnownProtocolKind::Hashable);
+      if (!hashableDecl) {
+        Out << "Hashable declaration could not be found\n";
+        abort();
+      }
+
+      checkSameType(E->getType(), anyHashableDecl->getDeclaredType(),
+                    "AnyHashableErasureExpr and the standard AnyHashable type");
+
+      if (E->getConformance().getRequirement() != hashableDecl) {
+        Out << "conformance on AnyHashableErasureExpr was not for Hashable\n";
+        E->getConformance().dump();
+        abort();
+      }
+
+      verifyConformance(E->getSubExpr()->getType(), E->getConformance());
+
       verifyCheckedBase(E);
     }
 
@@ -1434,10 +1527,6 @@ struct ASTNodeBase {};
 
       TupleType *TT = E->getType()->getAs<TupleType>();
       TupleType *SubTT = E->getSubExpr()->getType()->getAs<TupleType>();
-      if (!TT || (!SubTT && !E->isSourceScalar())) {
-        Out << "Unexpected types in TupleShuffleExpr\n";
-        abort();
-      }
       auto getSubElementType = [&](unsigned i) {
         if (E->isSourceScalar()) {
           assert(i == 0);
@@ -1445,6 +1534,17 @@ struct ASTNodeBase {};
         } else {
           return SubTT->getElementType(i);
         }
+      };
+
+      /// Retrieve the ith element type from the resulting tuple type.
+      auto getOuterElementType = [&](unsigned i) -> Type {
+        if (!TT) {
+          if (auto parenTy = dyn_cast<ParenType>(E->getType().getPointer()))
+            return parenTy->getUnderlyingType();
+          return E->getType();
+        }
+
+        return TT->getElementType(i);
       };
 
       unsigned varargsIndex = 0;
@@ -1461,13 +1561,13 @@ struct ASTNodeBase {};
         }
         if (subElem == TupleShuffleExpr::CallerDefaultInitialize) {
           auto init = E->getCallerDefaultArgs()[callerDefaultArgIndex++];
-          if (!TT->getElementType(i)->isEqual(init->getType())) {
+          if (!getOuterElementType(i)->isEqual(init->getType())) {
             Out << "Type mismatch in TupleShuffleExpr\n";
             abort();
           }
           continue;
         }
-        if (!TT->getElementType(i)->isEqual(getSubElementType(subElem))) {
+        if (!getOuterElementType(i)->isEqual(getSubElementType(subElem))) {
           Out << "Type mismatch in TupleShuffleExpr\n";
           abort();
         }
@@ -1598,7 +1698,7 @@ struct ASTNodeBase {};
         return false;
 
       case DeclContextKind::Initializer:
-      case DeclContextKind::NominalTypeDecl:
+      case DeclContextKind::GenericTypeDecl:
       case DeclContextKind::ExtensionDecl:
       case DeclContextKind::SubscriptDecl:
         return hasEnclosingFunctionContext(dc->getParent());
@@ -1653,6 +1753,25 @@ struct ASTNodeBase {};
     void verifyChecked(VarDecl *var) {
       PrettyStackTraceDecl debugStack("verifying VarDecl", var);
 
+      // Variables must have materializable type, unless they are parameters,
+      // in which case they must either have l-value type or be anonymous.
+      if (!var->getType()->isMaterializable()) {
+        if (!isa<ParamDecl>(var)) {
+          Out << "Non-parameter VarDecl has non-materializable type: ";
+          var->getType().print(Out);
+          Out << "\n";
+          abort();
+        }
+
+        if (!var->getType()->is<InOutType>() && var->hasName()) {
+          Out << "ParamDecl may only have non-materializable tuple type "
+                 "when it is anonymous: ";
+          var->getType().print(Out);
+          Out << "\n";
+          abort();
+        }
+      }
+
       // The fact that this is *directly* be a reference storage type
       // cuts the code down quite a bit in getTypeOfReference.
       if (var->getAttrs().hasAttribute<OwnershipAttr>() !=
@@ -1703,6 +1822,32 @@ struct ASTNodeBase {};
       }      
     }
 
+    /// Verify that the given conformance makes sense for the given
+    /// type.
+    void verifyConformance(Type type, ProtocolConformanceRef conformance) {
+      if (conformance.isAbstract()) {
+        if (!type->is<ArchetypeType>() && !type->isAnyExistentialType()) {
+          Out << "type " << type
+              << " should not have an abstract conformance to "
+              << conformance.getRequirement()->getName();
+          abort();
+        }
+
+        return;
+      }
+
+      if (type->getCanonicalType() !=
+            conformance.getConcrete()->getType()->getCanonicalType()) {
+        Out << "conforming type does not match conformance\n";
+        Out << "conforming type:\n";
+        type.dump(Out, 2);
+        Out << "\nconformance:\n";
+        conformance.getConcrete()->dump(Out, 2);
+        Out << "\n";
+        abort();
+      }
+    }
+
     /// Check the given explicit protocol conformance.
     void verifyConformance(Decl *decl, ProtocolConformance *conformance) {
       PrettyStackTraceDecl debugStack("verifying protocol conformance", decl);
@@ -1734,6 +1879,10 @@ struct ASTNodeBase {};
       if (!normal)
         return;
 
+      // If the conformance is lazily resolved, don't check it; that can cause
+      // massive deserialization at a point where the compiler cannot handle it.
+      if (normal->isLazilyResolved()) return;
+
       // Translate the owning declaration into a DeclContext.
       NominalTypeDecl *nominal = dyn_cast<NominalTypeDecl>(decl);
       DeclContext *conformingDC;
@@ -1742,7 +1891,7 @@ struct ASTNodeBase {};
       } else {
         auto ext = cast<ExtensionDecl>(decl);
         conformingDC = ext;
-        nominal = ext->isNominalTypeOrNominalTypeExtensionContext();
+        nominal = ext->getExtendedType()->getAnyNominal();
       }
 
       auto proto = conformance->getProtocol();
@@ -1777,6 +1926,10 @@ struct ASTNodeBase {};
             .verifyChecked(replacementType);
           continue;
         }
+          
+        // No witness necessary for type aliases
+        if (isa<TypeAliasDecl>(member))
+          continue;
         
         // If this is an accessor for something, ignore it.
         if (auto *FD = dyn_cast<FuncDecl>(member))
@@ -2156,6 +2309,15 @@ struct ASTNodeBase {};
         abort();
       }
 
+      // If the function has a generic interface type, it should also have a
+      // generic signature.
+      if (AFD->getInterfaceType()->is<GenericFunctionType>() !=
+          (AFD->getGenericSignature() != nullptr)) {
+        Out << "Missing generic signature for generic function\n";
+        AFD->dump(Out);
+        abort();
+      }
+
       // If there is an interface type, it shouldn't have any unresolved
       // dependent member types.
       // FIXME: This is a general property of the type system.
@@ -2186,8 +2348,8 @@ struct ASTNodeBase {};
       // Throwing @objc methods must have a foreign error convention.
       if (AFD->isObjC() &&
           static_cast<bool>(AFD->getForeignErrorConvention())
-            != AFD->isBodyThrowing()) {
-        if (AFD->isBodyThrowing())
+            != AFD->hasThrows()) {
+        if (AFD->hasThrows())
           Out << "@objc method throws but does not have a foreign error "
               << "convention";
         else
@@ -2196,8 +2358,32 @@ struct ASTNodeBase {};
         abort();
       }
 
-      if (AFD->getForeignErrorConvention() && !AFD->isObjC()) {
-        Out << "foreign error convention on non-@objc function\n";
+      // If a decl has the Throws bit set, the ThrowsLoc should be valid,
+      // and vice versa, unless the decl was imported, de-serialized, or
+      // implicit.
+      if (!AFD->isImplicit() &&
+          isa<SourceFile>(AFD->getModuleScopeContext()) &&
+          (AFD->getThrowsLoc().isValid() != AFD->hasThrows())) {
+        Out << "function 'throws' location does not match 'throws' flag\n";
+        AFD->dump(Out);
+        abort();
+      }
+
+      // If a decl has the Throws bit set, the function type should throw,
+      // and vice versa.
+      auto fnTy = AFD->getType()->castTo<AnyFunctionType>();
+      for (unsigned i = 1, e = AFD->getNumParameterLists(); i != e; ++i)
+        fnTy = fnTy->getResult()->castTo<AnyFunctionType>();
+
+      if (AFD->hasThrows() != fnTy->getExtInfo().throws()) {
+        Out << "function 'throws' flag does not match function type\n";
+        AFD->dump(Out);
+        abort();
+      }
+
+      if (AFD->getForeignErrorConvention()
+          && !AFD->isObjC() && !AFD->getAttrs().hasAttribute<CDeclAttr>()) {
+        Out << "foreign error convention on non-@objc, non-@_cdecl function\n";
         AFD->dump(Out);
         abort();
       }
@@ -2463,7 +2649,7 @@ struct ASTNodeBase {};
 
       // If the destination is a class, walk the supertypes of the source.
       if (destTy->getClassOrBoundGenericClass()) {
-        if (!destTy->isSuperclassOf(srcTy, nullptr)) {
+        if (!destTy->isBindableToSuperclassOf(srcTy, nullptr)) {
           srcTy.print(Out);
           Out << " is not a superclass of ";
           destTy.print(Out);
@@ -2510,7 +2696,7 @@ struct ASTNodeBase {};
     }
 
     Type checkExceptionTypeExists(const char *where) {
-      auto exn = Ctx.getExceptionTypeDecl();
+      auto exn = Ctx.getErrorDecl();
       if (exn) return exn->getDeclaredType();
 
       Out << "exception type does not exist in " << where << "\n";
@@ -2705,14 +2891,6 @@ struct ASTNodeBase {};
       }
       checkSourceRanges(D->getSourceRange(), Parent,
                         [&]{ D->print(Out); });
-      if (auto *VD = dyn_cast<VarDecl>(D)) {
-        if (!VD->getTypeSourceRangeForDiagnostics().isValid()) {
-          Out << "invalid type source range for variable decl: ";
-          D->print(Out);
-          Out << "\n";
-          abort();
-        }
-      }
     }
 
     /// \brief Verify that the given source ranges is contained within the

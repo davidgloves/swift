@@ -37,6 +37,7 @@ class GenericSignature;
 class LazyResolver;
 class ModuleDecl;
 class NominalTypeDecl;
+class GenericTypeDecl;
 class NormalProtocolConformance;
 enum OptionalTypeKind : unsigned;
 class ProtocolDecl;
@@ -68,6 +69,32 @@ typedef OptionSet<SubstFlags> SubstOptions;
 inline SubstOptions operator|(SubstFlags lhs, SubstFlags rhs) {
   return SubstOptions(lhs) | rhs;
 }
+
+/// Enumeration describing foreign languages to which Swift may be
+/// bridged.
+enum class ForeignLanguage {
+  C,
+  ObjectiveC,
+};
+
+/// Describes how a particular type is representable in a foreign language.
+enum class ForeignRepresentableKind : uint8_t {
+  /// This type is not representable in the foreign language.
+  None,
+  /// This type is trivially representable in the foreign language.
+  Trivial,
+  /// This type is trivially representable as an object in the foreign
+  /// language.
+  Object,
+  /// This type is representable in the foreign language via bridging.
+  Bridged,
+  /// This type is representable in the foreign language via bridging
+  /// of Error.
+  BridgedError,
+  /// This type is representable in the foreign language via static
+  /// bridging code, only (which is not available at runtime).
+  StaticBridged,
+};
 
 /// Type - This is a simple value object that contains a pointer to a type
 /// class.  This is potentially sugared.  We use this throughout the codebase
@@ -102,7 +129,7 @@ public:
   ///
   /// \returns true if the predicate returns true for the given type or any of
   /// its children.
-  bool findIf(const std::function<bool(Type)> &pred) const;
+  bool findIf(llvm::function_ref<bool(Type)> pred) const;
 
   /// Transform the given type by applying the user-provided function to
   /// each type.
@@ -119,10 +146,10 @@ public:
   /// accepts a type and returns either a transformed type or a null type.
   ///
   /// \returns the result of transforming the type.
-  Type transform(const std::function<Type(Type)> &fn) const;
+  Type transform(llvm::function_ref<Type(Type)> fn) const;
 
   /// Look through the given type and its children and apply fn to them.
-  void visit(const std::function<void (Type)> &fn) const {
+  void visit(llvm::function_ref<void (Type)> fn) const {
     findIf([&fn](Type t) -> bool {
         fn(t);
         return false;
@@ -156,7 +183,30 @@ public:
 
   /// Get the canonical type, or return null if the type is null.
   CanType getCanonicalTypeOrNull() const; // in Types.h
-  
+
+  /// Computes the meet between two types.
+  ///
+  /// The meet of two types is the most specific type that is a supertype of
+  /// both \c type1 and \c type2. For example, given a simple class hierarchy as
+  /// follows:
+  ///
+  /// \code
+  /// class A { }
+  /// class B : A { }
+  /// class C : A { }
+  /// class D { }
+  /// \endcode
+  ///
+  /// The meet of B and C is A, the meet of A and B is A. However, there is no
+  /// meet of D and A (or D and B, or D and C) because there is no common
+  /// superclass. One would have to jump to an existential (e.g., \c AnyObject)
+  /// to find a common type.
+  /// 
+  /// \returns the meet of the two types, if there is a concrete type that can
+  /// express the meet, or a null type if the only meet would be a more-general
+  /// existential type (e.g., \c Any).
+  static Type meet(Type type1, Type type2);
+
 private:
   // Direct comparison is disabled for types, because they may not be canonical.
   void operator==(Type T) const = delete;
@@ -251,7 +301,9 @@ public:
   StructDecl *getStructOrBoundGenericStruct() const; // in Types.h
   EnumDecl *getEnumOrBoundGenericEnum() const; // in Types.h
   NominalTypeDecl *getNominalOrBoundGenericNominal() const; // in Types.h
-  NominalTypeDecl *getAnyNominal() const; // in Types.h
+  CanType getNominalParent() const; // in Types.h
+  NominalTypeDecl *getAnyNominal() const;
+  GenericTypeDecl *getAnyGeneric() const;
 
   /// \brief Retrieve the most-specific class bound of this type,
   /// which is either a class, a bound-generic class, or a class-bounded
@@ -403,6 +455,7 @@ public:
     return Signature;
   }
 };
+
 } // end namespace swift
 
 namespace llvm {

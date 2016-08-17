@@ -15,8 +15,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef SWIFT_LANGOPTIONS_H
-#define SWIFT_LANGOPTIONS_H
+#ifndef SWIFT_BASIC_LANGOPTIONS_H
+#define SWIFT_BASIC_LANGOPTIONS_H
 
 #include "swift/Basic/LLVM.h"
 #include "clang/Basic/VersionTuple.h"
@@ -95,6 +95,9 @@ namespace swift {
     /// was not compiled with -enable-testing.
     bool EnableTestableAttrRequiresTestableModule = true;
 
+    /// Whether to implement SE-0111, the removal of argument labels in types.
+    bool SuppressArgumentLabelsInTypes = false;
+
     ///
     /// Flags for developers
     ///
@@ -128,32 +131,43 @@ namespace swift {
 
     /// \brief The upper bound, in bytes, of temporary data that can be
     /// allocated by the constraint solver.
-    unsigned SolverMemoryThreshold = 15000000;
+    unsigned SolverMemoryThreshold = 33554432; /* 32 * 1024 * 1024 */
 
     /// \brief Perform all dynamic allocations using malloc/free instead of
     /// optimized custom allocator, so that memory debugging tools can be used.
     bool UseMalloc = false;
-    
-    /// \brief Enable experimental "switch" pattern-matching features.
-    bool EnableExperimentalPatterns = false;
+
+    /// \brief Enable experimental property behavior feature.
+    bool EnableExperimentalPropertyBehaviors = false;
+
+    /// \brief Enable experimental nested generic types feature.
+    bool EnableExperimentalNestedGenericTypes = false;
+
+    /// \brief Enable generalized collection casting.
+    bool EnableExperimentalCollectionCasts = true;
 
     /// Should we check the target OSs of serialized modules to see that they're
     /// new enough?
     bool EnableTargetOSChecking = true;
 
-    /// Whether we're omitting needless words when importing Objective-C APIs.
+    /// Should 'private' use Swift 3's lexical scoping, or the Swift 2 behavior
+    /// of 'fileprivate'?
+    bool EnableSwift3Private = true;
+
+    /// Whether to use the import as member inference system
     ///
-    /// The vast majority of the logic for omitting needless words is
-    /// centralized in the Clang importer. However, there are a few
-    /// places elsewhere in the compiler that specifically reference
-    /// Objective-C entities whose names are affected by
-    /// omit-needless-words.
-    bool OmitNeedlessWords = false;
+    /// When importing a global, try to infer whether we can import it as a
+    /// member of some type instead. This includes inits, computed properties,
+    /// and methods.
+    bool InferImportAsMember = false;
+
+    /// Should 'id' in Objective-C be imported as 'Any' in Swift?
+    bool EnableIdAsAny = true;
 
     /// Enable the Swift 3 migration via Fix-Its.
     bool Swift3Migration = false;
 
-    /// Sets the target we are building for and updates configuration options
+    /// Sets the target we are building for and updates platform conditions
     /// to match.
     ///
     /// \returns A pair - the first element is true if the OS was invalid.
@@ -173,8 +187,8 @@ namespace swift {
       } else if (Target.isWatchOS()) {
         Target.getOSVersion(major, minor, revision);
       } else if (Target.isOSLinux() || Target.isOSFreeBSD() ||
-                 Target.getTriple().empty())
-      {
+                 Target.isAndroid() || Target.isOSWindows() ||
+                 Target.isPS4() || Target.getTriple().empty()) {
         major = minor = revision = 0;
       } else {
         llvm_unreachable("Unsupported target OS");
@@ -182,63 +196,64 @@ namespace swift {
       return clang::VersionTuple(major, minor, revision);
     }
 
-    /// Implicit target configuration options.  There are currently three
-    ///   supported target configuration values:
-    ///     os - The active os target (OSX or IOS)
-    ///     arch - The active arch target (X64, I386, ARM, ARM64)
-    ///     _runtime - Runtime support (_ObjC or _Native)
-    void addTargetConfigOption(StringRef Name, StringRef Value) {
+    /// Sets an implicit platform condition.
+    ///
+    /// There are currently three supported platform conditions:
+    /// - os: The active os target (OSX or iOS)
+    /// - arch: The active arch target (x86_64, i386, arm, arm64)
+    /// - _runtime: Runtime support (_ObjC or _Native)
+    void addPlatformConditionValue(StringRef Name, StringRef Value) {
       assert(!Name.empty() && !Value.empty());
-      TargetConfigOptions.push_back(std::make_pair(Name, Value));
+      PlatformConditionValues.emplace_back(Name, Value);
     }
 
-    /// Removes all configuration options added with addTargetConfigOption.
-    void clearAllTargetConfigOptions() {
-      TargetConfigOptions.clear();
+    /// Removes all values added with addPlatformConditionValue.
+    void clearAllPlatformConditionValues() {
+      PlatformConditionValues.clear();
     }
     
-    /// Returns the value for the given target configuration or an empty string.
-    StringRef getTargetConfigOption(StringRef Name) const;
-    
-    /// Explicit build configuration options, initialized via the '-D'
+    /// Returns the value for the given platform condition or an empty string.
+    StringRef getPlatformConditionValue(StringRef Name) const;
+
+    /// Explicit conditional compilation flags, initialized via the '-D'
     /// compiler flag.
-    void addBuildConfigOption(StringRef Name) {
+    void addCustomConditionalCompilationFlag(StringRef Name) {
       assert(!Name.empty());
-      BuildConfigOptions.push_back(Name);
+      CustomConditionalCompilationFlags.push_back(Name);
     }
 
-    /// Determines if a given build configuration has been defined.
-    bool hasBuildConfigOption(StringRef Name) const;
+    /// Determines if a given conditional compilation flag has been set.
+    bool isCustomConditionalCompilationFlagSet(StringRef Name) const;
 
     ArrayRef<std::pair<std::string, std::string>>
-        getTargetConfigOptions() const {
-      return TargetConfigOptions;
+    getPlatformConditionValues() const {
+      return PlatformConditionValues;
     }
 
-    ArrayRef<std::string> getBuildConfigOptions() const {
-      return BuildConfigOptions;
+    ArrayRef<std::string> getCustomConditionalCompilationFlags() const {
+      return CustomConditionalCompilationFlags;
     }
 
-    /// The constant list of supported os build configuration arguments.
-    static const std::vector<std::string> SupportedOSBuildConfigArguments;
-
-    /// Returns true if the os build configuration argument represents
+    /// Returns true if the 'os' platform condition argument represents
     /// a supported target operating system.
-    static bool isOSBuildConfigSupported(StringRef OSName);
+    ///
+    /// Note that this also canonicalizes the OS name if the check returns
+    /// true.
+    static bool checkPlatformConditionOS(StringRef &OSName);
 
-    /// The constant list of supported arch build configuration arguments.
-    static const std::vector<std::string> SupportedArchBuildConfigArguments;
-
-    /// Returns true if the arch build configuration argument represents
+    /// Returns true if the 'arch' platform condition argument represents
     /// a supported target architecture.
-    static bool isArchBuildConfigSupported(StringRef ArchName);
+    static bool isPlatformConditionArchSupported(StringRef ArchName);
+
+    /// Returns true if the 'endian' platform condition argument represents
+    /// a supported target endianness.
+    static bool isPlatformConditionEndiannessSupported(StringRef endianness);
 
   private:
-    llvm::SmallVector<std::pair<std::string, std::string>, 2>
-        TargetConfigOptions; 
-    llvm::SmallVector<std::string, 2> BuildConfigOptions;
+    llvm::SmallVector<std::pair<std::string, std::string>, 3>
+        PlatformConditionValues;
+    llvm::SmallVector<std::string, 2> CustomConditionalCompilationFlags;
   };
-}
+} // end namespace swift
 
-#endif // LLVM_SWIFT_LANGOPTIONS_H
-
+#endif // SWIFT_BASIC_LANGOPTIONS_H

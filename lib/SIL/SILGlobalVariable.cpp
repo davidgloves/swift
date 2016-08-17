@@ -25,7 +25,7 @@ SILGlobalVariable *SILGlobalVariable::create(SILModule &M, SILLinkage linkage,
   // allow the name to have an empty string.
   llvm::StringMapEntry<SILGlobalVariable*> *entry = nullptr;
   if (!name.empty()) {
-    entry = &*M.GlobalVariableTable.insert(std::make_pair(name, nullptr)).first;
+    entry = &*M.GlobalVariableMap.insert(std::make_pair(name, nullptr)).first;
     assert(!entry->getValue() && "global variable already exists");
     name = entry->getKey();
   }
@@ -48,7 +48,7 @@ SILGlobalVariable::SILGlobalVariable(SILModule &Module, SILLinkage Linkage,
     Location(Loc),
     Linkage(unsigned(Linkage)),
     Fragile(IsFragile),
-	VDecl(Decl) {
+    VDecl(Decl) {
   IsDeclaration = isAvailableExternally(Linkage);
   setLet(Decl ? Decl->isLet() : false);
   InitializerF = nullptr;
@@ -64,7 +64,7 @@ void SILGlobalVariable::setInitializer(SILFunction *InitF) {
 }
 
 SILGlobalVariable::~SILGlobalVariable() {
-  getModule().GlobalVariableTable.erase(Name);
+  getModule().GlobalVariableMap.erase(Name);
 }
 
 // FIXME
@@ -129,6 +129,7 @@ static bool analyzeStaticInitializer(SILFunction *F, SILInstruction *&Val,
       if (I.getKind() != ValueKind::ReturnInst &&
           I.getKind() != ValueKind::StructInst &&
           I.getKind() != ValueKind::TupleInst &&
+          I.getKind() != ValueKind::DebugValueInst &&
           I.getKind() != ValueKind::IntegerLiteralInst &&
           I.getKind() != ValueKind::FloatLiteralInst)
         return false;
@@ -149,7 +150,7 @@ SILGlobalVariable *SILGlobalVariable::getVariableOfStaticInitializer(
                      SILFunction *F) {
   SILInstruction *dummySI;
   SILGlobalVariable *GV;
-  if(analyzeStaticInitializer(F, dummySI, GV))
+  if (analyzeStaticInitializer(F, dummySI, GV))
     return GV;
   return nullptr;
 }
@@ -161,7 +162,7 @@ SILInstruction *SILGlobalVariable::getValueOfStaticInitializer() {
 
   SILInstruction *SI;
   SILGlobalVariable *dummyGV;
-  if(analyzeStaticInitializer(InitializerF, SI, dummyGV))
+  if (analyzeStaticInitializer(InitializerF, SI, dummyGV))
     return SI;
   return nullptr;
 }

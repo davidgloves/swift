@@ -1,10 +1,10 @@
-// RUN: %target-run-simple-swift | FileCheck %s
+// RUN: %target-run-simple-swift | %FileCheck %s
 // REQUIRES: executable_test
 
 // Generate all possible permutes.
 func _permuteInternal(
-  elem: Int, _ size: Int,
-  inout _ perm: [Int], inout _ visited: [Bool],
+  _ elem: Int, _ size: Int,
+  _ perm: inout [Int], _ visited: inout [Bool],
   _ verify: ([Int]) -> Void
 ) {
   if (elem == size) {
@@ -24,19 +24,19 @@ func _permuteInternal(
 }
 
 // Convenience wrapper for the permute method.
-func permute(size: Int, _ verify: ([Int]) -> Void) {
-  var perm = [Int](count: size, repeatedValue: 0)
-  var visited = [Bool](count: size, repeatedValue: false)
+func permute(_ size: Int, _ verify: ([Int]) -> Void) {
+  var perm = [Int](repeating: 0, count: size)
+  var visited = [Bool](repeating: false, count: size)
   _permuteInternal(0, size, &perm, &visited, verify)
 }
 
 
 // A simple random number generator.
-func randomize(size: Int, _ verify: ([Int]) -> Void) {
+func randomize(_ size: Int, _ verify: ([Int]) -> Void) {
   var arr : [Int] = []
   var N = 1
   var M = 1
-  for i in 0..<size {
+  for _ in 0..<size {
     N = N * 19 % 1024
     M = (N + M) % size
     arr.append(N)
@@ -59,9 +59,8 @@ let printer: ([Int]) -> Void = {
 //CHECK: [2, 1, 0]
 permute(3, printer)
 
-// Now, let's verify the sort.
 let sort_verifier: ([Int]) -> Void = {
-    var y = $0.sort()
+    var y = $0.sorted()
     for i in 0..<y.count - 1 {
     if (y[i] > y[i+1]) {
         print("Error: \(y)")
@@ -77,15 +76,16 @@ permute(7, sort_verifier)
 //CHECK: Test1 - Done
 print("Test1 - Done")
 
-// Now, let's verify the sort.
 let partition_verifier: ([Int]) -> Void = {
     var y = $0
-    // Partition() returns the index to the pivot value.
-    let idx = y.partition(0..<y.count)
-    // Check that all of the elements in the first partition are smaller or
-    // equal to the pivot value.
+    // partition(by:) returns the index to the pivot value.
+    let first = y.first
+    let idx = y.partition(by: { $0 >= first! })
+
+    // Check that all of the elements in the first partition are smaller than
+    // the pivot value.
     for i in 0..<idx {
-      if y[i] > y[idx]  {
+      if y[i] >= first! {
         print("Error!\n", terminator: "")
         return
       }
@@ -93,7 +93,7 @@ let partition_verifier: ([Int]) -> Void = {
     // Check that all of the elements in the second partition are greater or
     // equal to the pivot value.
     for i in idx..<y.count - 1 {
-      if y[i] < y[idx]  {
+      if y[i] < first! {
         print("Error!\n", terminator: "")
         return
       }

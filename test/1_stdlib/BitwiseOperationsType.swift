@@ -1,6 +1,9 @@
-// RUN: %target-run-simple-swift | FileCheck %s
+// RUN: %target-run-simple-swift
 // REQUIRES: executable_test
-struct MyInt32 : BitwiseOperationsType {
+
+import StdlibUnittest
+
+struct MyInt32 : BitwiseOperations {
   var underlying: Int32
 
   static var allZeros: MyInt32 { return MyInt32(underlying: 0) }
@@ -22,18 +25,19 @@ prefix func ~(x: MyInt32) -> MyInt32 {
   return MyInt32(underlying: ~x.underlying)
 }
 
-// |=
-var a = MyInt32(underlying: 0x3)
-a |= MyInt32(underlying: 0x4)
-assert(a.underlying == 0x7)
+let BitwiseOperationsTests = TestSuite("BitwiseOperations")
 
-// &=
-a &= MyInt32(underlying: 0x5)
-assert(a.underlying == 0x5)
+BitwiseOperationsTests.test("smoke test") {
+  var a = MyInt32(underlying: 0x3)
+  a |= MyInt32(underlying: 0x4)
+  expectEqual(0x7, a.underlying)
 
-// ^= 
-a ^= MyInt32(underlying: 0x6)
-assert(a.underlying == 0x3)
+  a &= MyInt32(underlying: 0x5)
+  expectEqual(0x5, a.underlying)
 
-// CHECK: done
-print("done")
+  a ^= MyInt32(underlying: 0x6)
+  expectEqual(0x3, a.underlying)
+}
+
+runAllTests()
+

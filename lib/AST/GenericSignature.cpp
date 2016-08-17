@@ -403,10 +403,10 @@ GenericSignature::getSubstitutionMap(ArrayRef<Substitution> args) const {
     args = args.slice(1);
     
     if (auto subTy = depTy->getAs<SubstitutableType>()) {
-      subs[subTy] = replacement;
+      subs[subTy->getCanonicalType().getPointer()] = replacement;
     }
     else if (auto dTy = depTy->getAs<DependentMemberType>()) {
-      subs[dTy] = replacement;
+      subs[dTy->getCanonicalType().getPointer()] = replacement;
     }
   }
   
@@ -485,12 +485,113 @@ SmallVector<ProtocolDecl *, 2> GenericSignature::getConformsTo(Type type,
 
 /// Determine whether the given dependent type is equal to a concrete type.
 bool GenericSignature::isConcreteType(Type type, ModuleDecl &mod) {
-  if (!type->isTypeParameter()) return true;
+  return bool(getConcreteType(type, mod));
+}
+
+/// Return the concrete type that the given dependent type is constrained to,
+/// or the null Type if it is not the subject of a concrete same-type
+/// constraint.
+Type GenericSignature::getConcreteType(Type type, ModuleDecl &mod) {
+  if (!type->isTypeParameter()) return Type();
 
   auto &builder = *getArchetypeBuilder(mod);
   auto pa = builder.resolveArchetype(type);
-  if (!pa) return true;
+  if (!pa) return Type();
 
   pa = pa->getRepresentative();
-  return pa->isConcreteType();
+  if (!pa->isConcreteType()) return Type();
+
+  return pa->getConcreteType();
+}
+
+Type GenericSignature::getRepresentative(Type type, ModuleDecl &mod) {
+  assert(type->isTypeParameter());
+  auto &builder = *getArchetypeBuilder(mod);
+  auto pa = builder.resolveArchetype(type);
+  assert(pa && "not a valid dependent type of this signature?");
+  auto rep = pa->getRepresentative();
+  if (rep->isConcreteType()) return rep->getConcreteType();
+  if (pa == rep) {
+    assert(rep->getDependentType(builder, /*allowUnresolved*/ false)
+              ->getCanonicalType() == type->getCanonicalType());
+    return type;
+  }
+  return rep->getDependentType(builder, /*allowUnresolved*/ false);
+}
+
+bool GenericSignature::areSameTypeParameterInContext(Type type1, Type type2,
+                                                     ModuleDecl &mod) {
+  assert(type1->isTypeParameter());
+  assert(type2->isTypeParameter());
+
+  if (type1.getPointer() == type2.getPointer())
+    return true;
+
+  auto &builder = *getArchetypeBuilder(mod);
+  auto pa1 = builder.resolveArchetype(type1);
+  assert(pa1 && "not a valid dependent type of this signature?");
+  pa1 = pa1->getRepresentative();
+  assert(!pa1->isConcreteType());
+
+  auto pa2 = builder.resolveArchetype(type2);
+  assert(pa2 && "not a valid dependent type of this signature?");
+  pa2 = pa2->getRepresentative();
+  assert(!pa2->isConcreteType());
+
+  return pa1 == pa2;
+}
+
+bool GenericSignature::isCanonicalTypeInContext(Type type, ModuleDecl &mod) {
+  // If the type isn't independently canonical, it's certainly not canonical
+  // in this context.
+  if (!type->isCanonical())
+    return false;
+
+  // All the contextual canonicality rules apply to type parameters, so if the
+  // type doesn't involve any type parameters, it's already canonical.
+  if (!type->hasTypeParameter())
+    return true;
+
+  auto &builder = *getArchetypeBuilder(mod);
+
+  // Look for non-canonical type parameters.
+  return !type.findIf([&](Type component) -> bool {
+    if (!component->isTypeParameter()) return false;
+
+    auto pa = builder.resolveArchetype(component);
+    if (!pa) return false;
+
+    auto rep = pa->getArchetypeAnchor();
+    return (rep->isConcreteType() || pa != rep);
+  });
+}
+
+CanType GenericSignature::getCanonicalTypeInContext(Type type, ModuleDecl &mod) {
+  type = type->getCanonicalType();
+
+  // All the contextual canonicality rules apply to type parameters, so if the
+  // type doesn't involve any type parameters, it's already canonical.
+  if (!type->hasTypeParameter())
+    return CanType(type);
+
+  auto &builder = *getArchetypeBuilder(mod);
+
+  // Replace non-canonical type parameters.
+  type = type.transform([&](Type component) -> Type {
+    if (!component->isTypeParameter()) return component;
+
+    // Resolve the potential archetype.  This can be null in nested generic
+    // types, which we can't immediately canonicalize.
+    auto pa = builder.resolveArchetype(component);
+    if (!pa) return component;
+
+    auto rep = pa->getArchetypeAnchor();
+    if (rep->isConcreteType()) {
+      return getCanonicalTypeInContext(rep->getConcreteType(), mod);
+    } else {
+      return rep->getDependentType(builder, /*allowUnresolved*/ false);
+    }
+  });
+
+  return type->getCanonicalType();
 }

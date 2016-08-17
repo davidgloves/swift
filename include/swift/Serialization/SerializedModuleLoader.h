@@ -106,6 +106,9 @@ class SerializedASTFile final : public LoadedFile {
   SerializedASTFile(Module &M, ModuleFile &file, bool isSIB = false)
     : LoadedFile(FileUnitKind::SerializedAST, M), File(file), IsSIB(isSIB) {}
 
+  void
+  collectLinkLibrariesFromImports(Module::LinkLibraryCallback callback) const;
+
 public:
   bool isSIB() const { return IsSIB; }
 
@@ -119,6 +122,9 @@ public:
 
   virtual OperatorDecl *lookupOperator(Identifier name,
                                        DeclKind fixity) const override;
+
+  virtual PrecedenceGroupDecl *
+  lookupPrecedenceGroup(Identifier name) const override;
 
   virtual void lookupVisibleDecls(Module::AccessPathTy accessPath,
                                   VisibleDeclConsumer &consumer,
@@ -136,7 +142,18 @@ public:
          ObjCSelector selector,
          SmallVectorImpl<AbstractFunctionDecl *> &results) const override;
 
-  Optional<BriefAndRawComment> getCommentForDecl(const Decl *D) const override;
+  Optional<CommentInfo> getCommentForDecl(const Decl *D) const override;
+
+  Optional<StringRef> getGroupNameForDecl(const Decl *D) const override;
+
+
+  Optional<StringRef> getSourceFileNameForDecl(const Decl *D) const override;
+
+  Optional<unsigned> getSourceOrderForDecl(const Decl *D) const override;
+
+  Optional<StringRef> getGroupNameByUSR(StringRef USR) const override;
+
+  void collectAllGroups(std::vector<StringRef> &Names) const override;
 
   virtual void getTopLevelDecls(SmallVectorImpl<Decl*> &results) const override;
 

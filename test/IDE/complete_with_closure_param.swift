@@ -1,16 +1,16 @@
-// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=COMPLETE | FileCheck %s
+// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=COMPLETE | %FileCheck %s
 
 typealias FunctionTypealias = (Int, Int) -> Bool
 typealias OptionalFunctionTypealias = ((Int, Int) -> Bool)?
 
 struct FooStruct {
-  func instanceMethod1(callback: (Int, Int) -> Void) {}
-  func instanceMethod2(callback: ((Int, Int) -> Void)?) {}
-  func instanceMethod3(callback: ((Int, Int) -> Void)??) {}
-  func instanceMethod4(callback: ((Int, Int) -> Void)!) {}
-  func instanceMethod5(callback: FunctionTypealias) {}
-  func instanceMethod6(callback: FunctionTypealias?) {}
-  func instanceMethod7(callback: OptionalFunctionTypealias) {}
+  func instanceMethod1(_ callback: (Int, Int) -> Void) {}
+  func instanceMethod2(_ callback: ((Int, Int) -> Void)?) {}
+  func instanceMethod3(_ callback: ((Int, Int) -> Void)??) {}
+  func instanceMethod4(_ callback: ((Int, Int) -> Void)!) {}
+  func instanceMethod5(_ callback: FunctionTypealias) {}
+  func instanceMethod6(_ callback: FunctionTypealias?) {}
+  func instanceMethod7(_ callback: OptionalFunctionTypealias) {}
 }
 
 FooStruct().#^COMPLETE^#

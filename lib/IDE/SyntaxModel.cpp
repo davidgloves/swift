@@ -58,6 +58,7 @@ SyntaxModelContext::SyntaxModelContext(SourceFile &SrcFile)
                                            /*TokenizeInterpolatedString=*/true);
   std::vector<SyntaxNode> Nodes;
   SourceLoc AttrLoc;
+  SourceLoc UnaryMinusLoc;
   auto LiteralStartLoc = Optional<SourceLoc>();
   for (unsigned I = 0, E = Tokens.size(); I != E; ++I) {
     auto &Tok = Tokens[I];
@@ -83,25 +84,47 @@ SyntaxModelContext::SyntaxModelContext(SourceFile &SrcFile)
       Length = Tok.getLength();
 
       if (LiteralStartLoc.hasValue() && Length.hasValue()) {
-        // We are still inside an object literal until we hit a r_square_lit.
-        if (Tok.getKind() != tok::r_square_lit) {
+        if (Tok.getKind() != tok::r_paren)
           continue;
-        }
         Kind = SyntaxNodeKind::ObjectLiteral;
         Nodes.emplace_back(Kind, CharSourceRange(SM, LiteralStartLoc.getValue(),
-          Tok.getRange().getEnd()));
+                                                 Tok.getRange().getEnd()));
         LiteralStartLoc = Optional<SourceLoc>();
         continue;
       }
 
       switch(Tok.getKind()) {
-#define KEYWORD(X) case tok::kw_##X: Kind = SyntaxNodeKind::Keyword; break;
+#define KEYWORD(X) case tok::kw_##X:
 #include "swift/Parse/Tokens.def"
 #undef KEYWORD
-      case tok::pound_selector: Kind = SyntaxNodeKind::Keyword; break;
-      case tok::pound_line:
-      case tok::pound_available: Kind =
-          SyntaxNodeKind::BuildConfigKeyword; break;
+        if (Tok.getKind() != tok::kw__ &&
+            0 < I && I < Tokens.size() - 1 &&
+            (Tokens[I-1].getKind() == tok::l_paren ||
+             Tokens[I-1].getKind() == tok::comma) &&
+            (Tokens[I+1].getKind() == tok::colon ||
+             Tokens[I+1].getKind() == tok::identifier ||
+             Tokens[I+1].isKeyword())) {
+          // Keywords are allowed as argument labels and should be treated as
+          // identifiers.  The exception is '_' which is not a name.
+          Kind = SyntaxNodeKind::Identifier;
+        } else {
+          Kind = SyntaxNodeKind::Keyword;
+        }
+        break;
+
+#define POUND_OLD_OBJECT_LITERAL(Name, NewName, OldArg, NewArg) \
+      case tok::pound_##Name:
+#define POUND_OBJECT_LITERAL(Name, Desc, Proto) case tok::pound_##Name:
+#include "swift/Parse/Tokens.def"
+        LiteralStartLoc = Loc;
+        continue;
+
+#define POUND_OBJECT_LITERAL(Name, Desc, Proto)
+#define POUND_OLD_OBJECT_LITERAL(Name, NewName, OldArg, NewArg)
+#define POUND_KEYWORD(Name) case tok::pound_##Name:
+#include "swift/Parse/Tokens.def"
+        Kind = SyntaxNodeKind::Keyword;
+        break;
       case tok::identifier:
         if (Tok.getText().startswith("<#"))
           Kind = SyntaxNodeKind::EditorPlaceholder;
@@ -109,9 +132,28 @@ SyntaxModelContext::SyntaxModelContext(SourceFile &SrcFile)
           Kind = SyntaxNodeKind::Identifier;
         break;
       case tok::dollarident: Kind = SyntaxNodeKind::DollarIdent; break;
-      case tok::integer_literal: Kind = SyntaxNodeKind::Integer; break;
-      case tok::floating_literal: Kind = SyntaxNodeKind::Floating; break;
       case tok::string_literal: Kind = SyntaxNodeKind::String; break;
+
+      case tok::integer_literal:
+        Kind = SyntaxNodeKind::Integer;
+        if (UnaryMinusLoc.isValid()) {
+          Loc = UnaryMinusLoc;
+          Length = *Length + SM.getByteDistance(UnaryMinusLoc, Tok.getLoc());
+        }
+        break;
+      case tok::floating_literal:
+        Kind = SyntaxNodeKind::Floating;
+        if (UnaryMinusLoc.isValid()) {
+          Loc = UnaryMinusLoc;
+          Length = *Length + SM.getByteDistance(UnaryMinusLoc, Tok.getLoc());
+        }
+        break;
+
+      case tok::oper_prefix:
+        if (Tok.getText() == "-")
+          UnaryMinusLoc = Loc;
+        continue;
+
       case tok::comment:
         if (Tok.getText().startswith("///") ||
             (IsPlayground && Tok.getText().startswith("//:")))
@@ -159,15 +201,12 @@ SyntaxModelContext::SyntaxModelContext(SourceFile &SrcFile)
         break;
       }
 
-      case tok::l_square_lit: {
-        LiteralStartLoc = Loc;
-        continue;
-      }
-
       default:
         continue;
       }
     }
+
+    UnaryMinusLoc = SourceLoc(); // Reset.
 
     assert(Loc.isValid());
     assert(Nodes.empty() || SM.isBeforeInBuffer(Nodes.back().Range.getStart(),
@@ -220,7 +259,7 @@ static const char *const RegexStrURL =
 #define MARKUP_SIMPLE_FIELD(Id, Keyword, XMLKind) \
   #Keyword "|"
 static const char *const RegexStrDocCommentField =
-  "^[ ]?- ("
+  "^[ ]*- ("
 #include "swift/Markup/SimpleFields.def"
   "returns):";
 
@@ -420,12 +459,15 @@ std::pair<bool, Expr *> ModelASTWalker::walkToExprPre(Expr *E) {
     if (isCurrentCallArgExpr(ParentTupleExpr)) {
       CharSourceRange NR = parameterNameRangeOfCallArg(ParentTupleExpr, E);
       SyntaxStructureNode SN;
-      SN.Kind = SyntaxStructureKind::Parameter;
+      SN.Kind = SyntaxStructureKind::Argument;
       SN.NameRange = NR;
       SN.BodyRange = charSourceRangeFromSourceRange(SM, E->getSourceRange());
-      if (NR.isValid())
+      if (NR.isValid()) {
         SN.Range = charSourceRangeFromSourceRange(SM, SourceRange(NR.getStart(),
                                                                   E->getEndLoc()));
+        passTokenNodesUntil(NR.getStart(),
+                            PassNodesBehavior::ExcludeNodeAtLocation);
+      }
       else
         SN.Range = SN.BodyRange;
 
@@ -458,11 +500,13 @@ std::pair<bool, Expr *> ModelASTWalker::walkToExprPre(Expr *E) {
   } else if (auto *ObjectE = dyn_cast<ObjectLiteralExpr>(E)) {
     SyntaxStructureNode SN;
     SN.Kind = SyntaxStructureKind::ObjectLiteralExpression;
-    SN.Range = charSourceRangeFromSourceRange(SM, E->getSourceRange());
-    SourceLoc NRStart = ObjectE->getNameLoc();
-    SourceLoc NREnd = NRStart.getAdvancedLoc(ObjectE->getName().getLength());
+    SN.Range = charSourceRangeFromSourceRange(SM, ObjectE->getSourceRange());
+    SourceLoc NRStart = ObjectE->getSourceLoc().getAdvancedLoc(1);    
+    SourceLoc NREnd =
+      NRStart.getAdvancedLoc(ObjectE->getLiteralKindRawName().size());
     SN.NameRange = CharSourceRange(SM, NRStart, NREnd);
-    SN.BodyRange = innerCharSourceRangeFromSourceRange(SM, E->getSourceRange());
+    SN.BodyRange =
+      innerCharSourceRangeFromSourceRange(SM, ObjectE->getSourceRange());
     pushStructureNode(SN, E);
 
   } else if (auto *ArrayE = dyn_cast<ArrayExpr>(E)) {
@@ -488,6 +532,12 @@ std::pair<bool, Expr *> ModelASTWalker::walkToExprPre(Expr *E) {
     }
     SN.BodyRange = innerCharSourceRangeFromSourceRange(SM, E->getSourceRange());
     pushStructureNode(SN, E);
+  } else if (auto *Tup = dyn_cast<TupleExpr>(E)) {
+    for (unsigned I = 0; I < Tup->getNumElements(); ++ I) {
+      SourceLoc NameLoc = Tup->getElementNameLoc(I);
+      if (NameLoc.isValid())
+        passTokenNodesUntil(NameLoc, PassNodesBehavior::ExcludeNodeAtLocation);
+    }
   }
 
   return { true, E };
@@ -505,12 +555,13 @@ void ModelASTWalker::handleStmtCondition(StmtCondition cond) {
   for (const auto &elt : cond) {
     if (elt.getKind() != StmtConditionElement::CK_Availability) continue;
 
-    SmallVector<CharSourceRange, 5> PlatformRanges;
-    elt.getAvailability()->getPlatformKeywordRanges(PlatformRanges);
-    std::for_each(PlatformRanges.begin(), PlatformRanges.end(),
-                  [&](CharSourceRange &Range) {
-                    passNonTokenNode({SyntaxNodeKind::Keyword, Range});
-                  });
+    SmallVector<SourceLoc, 5> PlatformLocs;
+    elt.getAvailability()->getPlatformKeywordLocs(PlatformLocs);
+    std::for_each(PlatformLocs.begin(), PlatformLocs.end(),
+                  [&](SourceLoc loc) {
+      auto range = charSourceRangeFromSourceRange(SM, loc);
+      passNonTokenNode({SyntaxNodeKind::Keyword, range});
+    });
   }
 }
 
@@ -675,7 +726,7 @@ std::pair<bool, Stmt *> ModelASTWalker::walkToStmtPre(Stmt *S) {
       if (Clause.Cond && !annotateIfConfigConditionIdentifiers(Clause.Cond))
         return { false, nullptr };
 
-      for(auto &Element : Clause.Elements) {
+      for (auto &Element : Clause.Elements) {
         if (Expr *E = Element.dyn_cast<Expr*>()) {
           E->walk(*this);
         } else if (Stmt *S = Element.dyn_cast<Stmt*>()) {
@@ -811,9 +862,11 @@ bool ModelASTWalker::walkToDeclPre(Decl *D) {
     SyntaxStructureNode SN;
     SN.Dcl = D;
     SN.Kind = SyntaxStructureKind::Parameter;
-    if (!PD->getArgumentName().empty())
-      SN.NameRange = CharSourceRange(PD->getSourceRange().Start,
-                                     PD->getArgumentName().getLength());
+    if (!PD->getArgumentName().empty()) {
+      SourceLoc ArgStart = PD->getSourceRange().Start;
+      SN.NameRange = CharSourceRange(ArgStart, PD->getArgumentName().getLength());
+      passTokenNodesUntil(ArgStart, PassNodesBehavior::ExcludeNodeAtLocation);
+    }
     SN.Range = charSourceRangeFromSourceRange(SM, PD->getSourceRange());
     SN.Attrs = PD->getAttrs();
     SN.TypeRange = charSourceRangeFromSourceRange(SM,
@@ -884,16 +937,15 @@ bool ModelASTWalker::walkToDeclPre(Decl *D) {
             CharSourceRange(ConfigD->getEndLoc(), 6/*'#endif'*/) }))
         return false;
 
+  } else if (auto PrecD = dyn_cast<PrecedenceGroupDecl>(D)) {
+    // Highlight specifiers like "associativity" or "assignment" as keywords.
+    SmallVector<CharSourceRange, 3> KeywordsRanges;
+    PrecD->collectOperatorKeywordRanges(KeywordsRanges);
+    for (auto &Range : KeywordsRanges) {
+      passNonTokenNode({SyntaxNodeKind::Keyword, Range});
+    };
+
   } else if (auto OperD = dyn_cast<OperatorDecl>(D)) {
-    // If the operator is infix operator, highlight specifiers like
-    // "associativity" or "assignment" as keywords.
-    if (auto IFO = dyn_cast<InfixOperatorDecl>(OperD)) {
-      SmallVector<CharSourceRange, 3> KeywordsRanges;
-      IFO->collectOperatorKeywordRanges(KeywordsRanges);
-      for (auto &Range : KeywordsRanges) {
-        passNonTokenNode({SyntaxNodeKind::Keyword, Range});
-      };
-    }
     if (!passNonTokenNode({ SyntaxNodeKind::Keyword,
           CharSourceRange(OperD->getOperatorLoc(), strlen("operator")) }))
       return false;
@@ -1323,6 +1375,29 @@ bool ModelASTWalker::findUrlStartingLoc(StringRef Text,
   return false;
 }
 
+static CharSourceRange sanitizeUnpairedParenthesis(CharSourceRange Range) {
+  auto Text = Range.str();
+  if (Text.back() != ')') {
+    return Range;
+  }
+  unsigned Pairs = 0;
+  unsigned TrimLen = 0;
+  for (char C : Text) {
+    if (C == '(') {
+      Pairs ++;
+    } else if (C == ')') {
+      if (Pairs == 0)
+        TrimLen ++;
+      else
+        Pairs --;
+    } else {
+      TrimLen = 0;
+    }
+  }
+
+  return CharSourceRange(Range.getStart(), Text.size() - TrimLen);
+}
+
 bool ModelASTWalker::searchForURL(CharSourceRange Range) {
   StringRef OrigText = SM.extractText(Range, BufferID);
   SourceLoc OrigLoc = Range.getStart();
@@ -1339,7 +1414,8 @@ bool ModelASTWalker::searchForURL(CharSourceRange Range) {
       StringRef Match(RxMatch.first, RxMatch.second - RxMatch.first);
       SourceLoc Loc = OrigLoc.getAdvancedLoc(Match.data() - OrigText.data());
       CharSourceRange Range(Loc, Match.size());
-      SyntaxNode Node{ SyntaxNodeKind::CommentURL, Range };
+      SyntaxNode Node{ SyntaxNodeKind::CommentURL,
+                       sanitizeUnpairedParenthesis(Range) };
       if (!passNode(Node))
         return false;
       Text = Text.substr(Match.data() - Text.data() + Match.size());
@@ -1388,6 +1464,8 @@ bool ModelASTWalker::findFieldsInDocCommentLine(SyntaxNode Node) {
   auto FieldNode = parseFieldNode(Text, OrigText, OrigLoc);
   if (FieldNode.hasValue())
     passNode(FieldNode.getValue());
+  else
+    searchForURL(Node.Range);
   return true;
 }
 
@@ -1395,10 +1473,11 @@ bool ModelASTWalker::findFieldsInDocCommentBlock(SyntaxNode Node) {
   auto OrigText = SM.extractText(Node.Range, BufferID);
   auto OrigLoc = Node.Range.getStart();
 
-  if (!OrigText.startswith("/**"))
+  if (!OrigText.startswith("/**") &&
+      !(LangOpts.Playground && OrigText.startswith("/*:")))
     return true;
 
-  auto Text = OrigText.drop_front(3); // Drop "^/**"
+  auto Text = OrigText.drop_front(3); // Drop "^/**" or "/*:"
 
   if (!Text.endswith("*/"))
     return true;
@@ -1408,11 +1487,15 @@ bool ModelASTWalker::findFieldsInDocCommentBlock(SyntaxNode Node) {
   if (Text.empty())
     return true;
 
-  auto FirstNewLine = Text.find('\n');
-  if (FirstNewLine == StringRef::npos)
+  llvm::SmallVector<StringRef, 8> RawLines;
+  Text.split(RawLines, '\n');
+  auto FirstNewLine = std::find_if(RawLines.begin(), RawLines.end(),
+    [](StringRef Line) { return !Line.trim().empty(); });
+
+  if (FirstNewLine == RawLines.end())
     return true;
 
-  Text = Text.substr(FirstNewLine + 1);
+  Text = Text.substr(FirstNewLine->data() - Text.data());
   if (Text.empty())
     return true;
 
@@ -1427,6 +1510,10 @@ bool ModelASTWalker::findFieldsInDocCommentBlock(SyntaxNode Node) {
     auto FieldNode = parseFieldNode(Line.drop_front(Indent), OrigText, OrigLoc);
     if (FieldNode.hasValue())
       passNode(FieldNode.getValue());
+    else
+      searchForURL(CharSourceRange(Node.Range.getStart().
+        getAdvancedLoc(Line.data() - OrigText.data()),
+                                   Line.size()));
   }
 
   std::match_results<StringRef::iterator> Matches;

@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -parse-as-library -emit-silgen -disable-objc-attr-requires-foundation-module %s | FileCheck %s
+// RUN: %target-swift-frontend -Xllvm -sil-full-demangle -parse-as-library -emit-silgen -disable-objc-attr-requires-foundation-module %s | %FileCheck %s
 
 var zero: Int = 0
 
@@ -8,7 +8,7 @@ func getInt() -> Int { return zero }
 
 // CHECK-LABEL: sil hidden  @{{.*}}physical_tuple_lvalue
 // CHECK: bb0(%0 : $Int):
-func physical_tuple_lvalue(c: Int) {
+func physical_tuple_lvalue(_ c: Int) {
   var x : (Int, Int)
   // CHECK: [[BOX:%[0-9]+]] = alloc_box $(Int, Int)
   // CHECK: [[XADDR1:%.*]] = project_box [[BOX]]
@@ -30,7 +30,7 @@ func physical_tuple_rvalue() -> Int {
 }
 
 // CHECK-LABEL: sil hidden  @_TF10properties16tuple_assignment
-func tuple_assignment(inout a: Int, inout b: Int) {
+func tuple_assignment(_ a: inout Int, b: inout Int) {
   // CHECK: bb0([[A_ADDR:%[0-9]+]] : $*Int, [[B_ADDR:%[0-9]+]] : $*Int):
   // CHECK: [[A_LOCAL:%.*]] = alloc_box $Int
   // CHECK: [[PBA:%.*]] = project_box [[A_LOCAL]]
@@ -44,7 +44,7 @@ func tuple_assignment(inout a: Int, inout b: Int) {
 }
 
 // CHECK-LABEL: sil hidden  @_TF10properties18tuple_assignment_2
-func tuple_assignment_2(inout a: Int, inout b: Int, xy: (Int, Int)) {
+func tuple_assignment_2(_ a: inout Int, b: inout Int, xy: (Int, Int)) {
   // CHECK: bb0([[A_ADDR:%[0-9]+]] : $*Int, [[B_ADDR:%[0-9]+]] : $*Int, [[X:%[0-9]+]] : $Int, [[Y:%[0-9]+]] : $Int):
   // CHECK: [[A_LOCAL:%.*]] = alloc_box $Int
   // CHECK: [[PBA:%.*]] = project_box [[A_LOCAL]]
@@ -96,7 +96,7 @@ struct Val {
 }
 
 // CHECK-LABEL: sil hidden  @_TF10properties22physical_struct_lvalue
-func physical_struct_lvalue(c: Int) {
+func physical_struct_lvalue(_ c: Int) {
   var v : Val
   // CHECK: [[VADDR:%[0-9]+]] = alloc_box $Val
   v.y = c
@@ -104,7 +104,7 @@ func physical_struct_lvalue(c: Int) {
 }
 
 // CHECK-LABEL: sil hidden  @_TF10properties21physical_class_lvalue
- func physical_class_lvalue(r: Ref, a: Int) {
+ func physical_class_lvalue(_ r: Ref, a: Int) {
     r.y = a
 
    // CHECK: [[FN:%[0-9]+]] = class_method %0 : $Ref, #Ref.y!setter.1
@@ -114,7 +114,7 @@ func physical_struct_lvalue(c: Int) {
 
 
 // CHECK-LABEL: sil hidden  @_TF10properties24physical_subclass_lvalue
- func physical_subclass_lvalue(r: RefSubclass, a: Int) {
+ func physical_subclass_lvalue(_ r: RefSubclass, a: Int) {
     r.y = a
    // strong_retain %0 : $RefSubclass
    // CHECK: [[R_SUP:%[0-9]+]] = upcast %0 : $RefSubclass to $Ref
@@ -164,7 +164,7 @@ func logical_struct_get() -> Int {
 }
 
 // CHECK-LABEL: sil hidden  @_TF10properties18logical_struct_set
-func logical_struct_set(inout value: Val, z: Int) {
+func logical_struct_set(_ value: inout Val, z: Int) {
   // CHECK: bb0([[VAL:%[0-9]+]] : $*Val, [[Z:%[0-9]+]] : $Int):
   value.z = z
   // CHECK: [[VAL_LOCAL:%[0-9]+]] = alloc_box $Val
@@ -175,7 +175,7 @@ func logical_struct_set(inout value: Val, z: Int) {
 }
 
 // CHECK-LABEL: sil hidden  @_TF10properties27logical_struct_in_tuple_set
-func logical_struct_in_tuple_set(inout value: (Int, Val), z: Int) {
+func logical_struct_in_tuple_set(_ value: inout (Int, Val), z: Int) {
   // CHECK: bb0([[VAL:%[0-9]+]] : $*(Int, Val), [[Z:%[0-9]+]] : $Int):
   value.1.z = z
   // CHECK: [[VAL_LOCAL:%[0-9]+]] = alloc_box $(Int, Val)
@@ -187,7 +187,7 @@ func logical_struct_in_tuple_set(inout value: (Int, Val), z: Int) {
 }
 
 // CHECK-LABEL: sil hidden  @_TF10properties29logical_struct_in_reftype_set
-func logical_struct_in_reftype_set(inout value: Val, z1: Int) {
+func logical_struct_in_reftype_set(_ value: inout Val, z1: Int) {
   // CHECK: bb0([[VAL:%[0-9]+]] : $*Val, [[Z1:%[0-9]+]] : $Int):
   value.ref.val_prop.z_tuple.1 = z1
   // CHECK: [[VAL_LOCAL:%[0-9]+]] = alloc_box $Val
@@ -200,19 +200,24 @@ func logical_struct_in_reftype_set(inout value: Val, z1: Int) {
   // CHECK: [[STORAGE:%.*]] = alloc_stack $Builtin.UnsafeValueBuffer
   // CHECK: [[VAL_REF_VAL_PROP_TEMP:%.*]] = alloc_stack $Val
   // CHECK: [[T0:%.*]] = address_to_pointer [[VAL_REF_VAL_PROP_TEMP]] : $*Val to $Builtin.RawPointer
-  // CHECK: [[MAT_VAL_PROP_METHOD:%[0-9]+]] = class_method {{.*}} : $Ref, #Ref.val_prop!materializeForSet.1 : (Ref) -> (Builtin.RawPointer, inout Builtin.UnsafeValueBuffer) -> (Builtin.RawPointer, (@convention(thin) (Builtin.RawPointer, inout Builtin.UnsafeValueBuffer, inout Ref, @thick Ref.Type) -> ())?)
+  // CHECK: [[MAT_VAL_PROP_METHOD:%[0-9]+]] = class_method {{.*}} : $Ref, #Ref.val_prop!materializeForSet.1 : (Ref) -> (Builtin.RawPointer, inout Builtin.UnsafeValueBuffer) -> (Builtin.RawPointer, Builtin.RawPointer?)
   // CHECK: [[MAT_RESULT:%[0-9]+]] = apply [[MAT_VAL_PROP_METHOD]]([[T0]], [[STORAGE]], [[VAL_REF]])
-  // CHECK: [[T0:%.*]] = tuple_extract [[MAT_RESULT]] : $(Builtin.RawPointer, Optional<@convention(thin) (Builtin.RawPointer, inout Builtin.UnsafeValueBuffer, inout Ref, @thick Ref.Type) -> ()>), 0
-  // CHECK: [[T1:%[0-9]+]] = pointer_to_address [[T0]] : $Builtin.RawPointer to $*Val
-  // CHECK: [[OPT_CALLBACK:%.*]] = tuple_extract [[MAT_RESULT]] : $(Builtin.RawPointer, Optional<@convention(thin) (Builtin.RawPointer, inout Builtin.UnsafeValueBuffer, inout Ref, @thick Ref.Type) -> ()>), 1  
+  // CHECK: [[T0:%.*]] = tuple_extract [[MAT_RESULT]] : $(Builtin.RawPointer, Optional<Builtin.RawPointer>), 0
+  // CHECK: [[OPT_CALLBACK:%.*]] = tuple_extract [[MAT_RESULT]] : $(Builtin.RawPointer, Optional<Builtin.RawPointer>), 1  
+  // CHECK: [[T1:%[0-9]+]] = pointer_to_address [[T0]] : $Builtin.RawPointer to [strict] $*Val
   // CHECK: [[VAL_REF_VAL_PROP_MAT:%.*]] = mark_dependence [[T1]] : $*Val on [[VAL_REF]]
   // CHECK: [[V_R_VP_Z_TUPLE_MAT:%[0-9]+]] = alloc_stack $(Int, Int)
   // CHECK: [[LD:%[0-9]+]] = load [[VAL_REF_VAL_PROP_MAT]]
   // CHECK: retain_value [[LD]]
   // -- val.ref.val_prop.z_tuple
   // CHECK: [[GET_Z_TUPLE_METHOD:%[0-9]+]] = function_ref @_TFV10properties3Valg7z_tupleT
+  // CHECK: [[A0:%.*]] = tuple_element_addr [[V_R_VP_Z_TUPLE_MAT]] : {{.*}}, 0
+  // CHECK: [[A1:%.*]] = tuple_element_addr [[V_R_VP_Z_TUPLE_MAT]] : {{.*}}, 1
   // CHECK: [[V_R_VP_Z_TUPLE:%[0-9]+]] = apply [[GET_Z_TUPLE_METHOD]]([[LD]])
-  // CHECK: store [[V_R_VP_Z_TUPLE]] to [[V_R_VP_Z_TUPLE_MAT]]
+  // CHECK: [[T0:%.*]] = tuple_extract [[V_R_VP_Z_TUPLE]] : {{.*}}, 0
+  // CHECK: [[T1:%.*]] = tuple_extract [[V_R_VP_Z_TUPLE]] : {{.*}}, 1
+  // CHECK: store [[T0]] to [[A0]]
+  // CHECK: store [[T1]] to [[A1]]
   // -- write to val.ref.val_prop.z_tuple.1
   // CHECK: [[V_R_VP_Z_TUPLE_1:%[0-9]+]] = tuple_element_addr [[V_R_VP_Z_TUPLE_MAT]] : {{.*}}, 1
   // CHECK: assign [[Z1]] to [[V_R_VP_Z_TUPLE_1]]
@@ -221,8 +226,9 @@ func logical_struct_in_reftype_set(inout value: Val, z1: Int) {
   // CHECK: [[SET_Z_TUPLE_METHOD:%[0-9]+]] = function_ref @_TFV10properties3Vals7z_tupleT
   // CHECK: apply [[SET_Z_TUPLE_METHOD]]({{%[0-9]+, %[0-9]+}}, [[VAL_REF_VAL_PROP_MAT]])
   // -- writeback to val.ref.val_prop
-  // CHECK: switch_enum [[OPT_CALLBACK]] : $Optional<@convention(thin) (Builtin.RawPointer, inout Builtin.UnsafeValueBuffer, inout Ref, @thick Ref.Type) -> ()>, case #Optional.Some!enumelt.1: [[WRITEBACK:bb[0-9]+]], case #Optional.None!enumelt: [[CONT:bb[0-9]+]]
-  // CHECK: [[WRITEBACK]]([[CALLBACK:%.*]] : $@convention(thin) (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @inout Ref, @thick Ref.Type) -> ()):
+  // CHECK: switch_enum [[OPT_CALLBACK]] : $Optional<Builtin.RawPointer>, case #Optional.some!enumelt.1: [[WRITEBACK:bb[0-9]+]], case #Optional.none!enumelt: [[CONT:bb[0-9]+]]
+  // CHECK: [[WRITEBACK]]([[CALLBACK_ADDR:%.*]] : $Builtin.RawPointer):
+  // CHECK: [[CALLBACK:%.*]] = pointer_to_thin_function [[CALLBACK_ADDR]] : $Builtin.RawPointer to $@convention(thin) (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @inout Ref, @thick Ref.Type) -> ()
   // CHECK: [[REF_MAT:%.*]] = alloc_stack $Ref
   // CHECK: store [[VAL_REF]] to [[REF_MAT]]
   // CHECK: [[T0:%.*]] = metatype $@thick Ref.Type
@@ -239,12 +245,12 @@ func logical_struct_in_reftype_set(inout value: Val, z1: Int) {
 func reftype_rvalue() -> Ref {}
 
 // CHECK-LABEL: sil hidden  @_TF10properties18reftype_rvalue_set
-func reftype_rvalue_set(value: Val) {
+func reftype_rvalue_set(_ value: Val) {
   reftype_rvalue().val_prop = value
 }
 
 // CHECK-LABEL: sil hidden  @_TF10properties27tuple_in_logical_struct_set
-func tuple_in_logical_struct_set(inout value: Val, z1: Int) {
+func tuple_in_logical_struct_set(_ value: inout Val, z1: Int) {
   // CHECK: bb0([[VAL:%[0-9]+]] : $*Val, [[Z1:%[0-9]+]] : $Int):
   value.z_tuple.1 = z1
   // CHECK: [[VAL_LOCAL:%[0-9]+]] = alloc_box $Val
@@ -253,8 +259,13 @@ func tuple_in_logical_struct_set(inout value: Val, z1: Int) {
   // CHECK: [[VAL1:%[0-9]+]] = load [[PB]]
   // CHECK: retain_value [[VAL1]]
   // CHECK: [[Z_GET_METHOD:%[0-9]+]] = function_ref @_TFV10properties3Valg7z_tupleT
+  // CHECK: [[A0:%.*]] = tuple_element_addr [[Z_TUPLE_MATERIALIZED]] : {{.*}}, 0
+  // CHECK: [[A1:%.*]] = tuple_element_addr [[Z_TUPLE_MATERIALIZED]] : {{.*}}, 1
   // CHECK: [[Z_TUPLE:%[0-9]+]] = apply [[Z_GET_METHOD]]([[VAL1]])
-  // CHECK: store [[Z_TUPLE]] to [[Z_TUPLE_MATERIALIZED]]
+  // CHECK: [[T0:%.*]] = tuple_extract [[Z_TUPLE]] : {{.*}}, 0
+  // CHECK: [[T1:%.*]] = tuple_extract [[Z_TUPLE]] : {{.*}}, 1
+  // CHECK: store [[T0]] to [[A0]]
+  // CHECK: store [[T1]] to [[A1]]
   // CHECK: [[Z_TUPLE_1:%[0-9]+]] = tuple_element_addr [[Z_TUPLE_MATERIALIZED]] : {{.*}}, 1
   // CHECK: assign [[Z1]] to [[Z_TUPLE_1]]
   // CHECK: [[Z_TUPLE_MODIFIED:%[0-9]+]] = load [[Z_TUPLE_MATERIALIZED]]
@@ -284,14 +295,14 @@ func logical_global_get() -> Int {
 }
 
 // CHECK-LABEL: sil hidden  @_TF10properties18logical_global_set
-func logical_global_set(x: Int) {
+func logical_global_set(_ x: Int) {
   global_prop = x
   // CHECK: [[SET:%[0-9]+]] = function_ref @_TF10propertiess11global_prop
   // CHECK: apply [[SET]](%0)
 }
 
 // CHECK-LABEL: sil hidden  @_TF10properties17logical_local_get
-func logical_local_get(x: Int) -> Int {
+func logical_local_get(_ x: Int) -> Int {
   var prop : Int {
     get {
       return x
@@ -305,7 +316,7 @@ func logical_local_get(x: Int) -> Int {
 // CHECK: bb0(%{{[0-9]+}} : $Int):
 
 // CHECK-LABEL: sil hidden  @_TF10properties26logical_local_captured_get
-func logical_local_captured_get(x: Int) -> Int {
+func logical_local_captured_get(_ x: Int) -> Int {
   var prop : Int {
     get {
       return x
@@ -322,10 +333,10 @@ func logical_local_captured_get(x: Int) -> Int {
 // CHECK: sil shared @_TFF10properties26logical_local_captured_get
 // CHECK: bb0(%{{[0-9]+}} : $Int):
 
-func inout_arg(inout x: Int) {}
+func inout_arg(_ x: inout Int) {}
 
 // CHECK-LABEL: sil hidden  @_TF10properties14physical_inout
-func physical_inout(x: Int) {
+func physical_inout(_ x: Int) {
   var x = x
   // CHECK: [[XADDR:%[0-9]+]] = alloc_box $Int
   // CHECK: [[PB:%.*]] = project_box [[XADDR]]
@@ -340,7 +351,7 @@ func physical_inout(x: Int) {
 
 // CHECK-LABEL: sil hidden  @_TF10properties17val_subscript_get
 // CHECK: bb0([[VVAL:%[0-9]+]] : $Val, [[I:%[0-9]+]] : $Int):
-func val_subscript_get(v: Val, i: Int) -> Float {
+func val_subscript_get(_ v: Val, i: Int) -> Float {
   return v[i]
   // CHECK: [[SUBSCRIPT_GET_METHOD:%[0-9]+]] = function_ref @_TFV10properties3Valg9subscript
   // CHECK: [[RET:%[0-9]+]] = apply [[SUBSCRIPT_GET_METHOD]]([[I]], [[VVAL]]) : $@convention(method) (Int, @guaranteed Val)
@@ -349,7 +360,7 @@ func val_subscript_get(v: Val, i: Int) -> Float {
 
 // CHECK-LABEL: sil hidden  @_TF10properties17val_subscript_set
 // CHECK: bb0(%0 : $Val, [[I:%[0-9]+]] : $Int, [[X:%[0-9]+]] : $Float):
-func val_subscript_set(v: Val, i: Int, x: Float) {
+func val_subscript_set(_ v: Val, i: Int, x: Float) {
   var v = v
   v[i] = x
   // CHECK: [[VADDR:%[0-9]+]] = alloc_box $Val
@@ -369,26 +380,26 @@ struct Generic<T> {
 
   // CHECK-LABEL: sil hidden  @_TFV10properties7Generic19copy_typevar_member
   mutating
-  func copy_typevar_member(x: Generic<T>) {
+  func copy_typevar_member(_ x: Generic<T>) {
     typevar_member = x.typevar_member
   }
 }
 
 // CHECK-LABEL: sil hidden  @_TF10properties21generic_mono_phys_get
-func generic_mono_phys_get<T>(g: Generic<T>) -> Int {
+func generic_mono_phys_get<T>(_ g: Generic<T>) -> Int {
   return g.mono_phys
   // CHECK: struct_element_addr %{{.*}}, #Generic.mono_phys
 }
 
 // CHECK-LABEL: sil hidden  @_TF10properties20generic_mono_log_get
-func generic_mono_log_get<T>(g: Generic<T>) -> Int {
+func generic_mono_log_get<T>(_ g: Generic<T>) -> Int {
   return g.mono_log
   // CHECK: [[GENERIC_GET_METHOD:%[0-9]+]] = function_ref @_TFV10properties7Genericg8mono_log
   // CHECK: apply [[GENERIC_GET_METHOD]]<
 }
 
 // CHECK-LABEL: sil hidden  @_TF10properties20generic_mono_log_set
-func generic_mono_log_set<T>(g: Generic<T>, x: Int) {
+func generic_mono_log_set<T>(_ g: Generic<T>, x: Int) {
   var g = g
   g.mono_log = x
   // CHECK: [[GENERIC_SET_METHOD:%[0-9]+]] = function_ref @_TFV10properties7Generics8mono_log
@@ -396,34 +407,34 @@ func generic_mono_log_set<T>(g: Generic<T>, x: Int) {
 }
 
 // CHECK-LABEL: sil hidden  @_TF10properties26generic_mono_subscript_get
-func generic_mono_subscript_get<T>(g: Generic<T>, i: Int) -> Float {
+func generic_mono_subscript_get<T>(_ g: Generic<T>, i: Int) -> Float {
   return g[i]
   // CHECK: [[GENERIC_GET_METHOD:%[0-9]+]] = function_ref @_TFV10properties7Genericg9subscript
   // CHECK: apply [[GENERIC_GET_METHOD]]<
 }
 
 // CHECK-LABEL: sil hidden  @{{.*}}generic_mono_subscript_set
-func generic_mono_subscript_set<T>(inout g: Generic<T>, i: Int, x: Float) {
+func generic_mono_subscript_set<T>(_ g: inout Generic<T>, i: Int, x: Float) {
   g[i] = x
   // CHECK: [[GENERIC_SET_METHOD:%[0-9]+]] = function_ref @_TFV10properties7Generics9subscript
   // CHECK: apply [[GENERIC_SET_METHOD]]<
 }
 
 // CHECK-LABEL: sil hidden  @{{.*}}bound_generic_mono_phys_get
-func bound_generic_mono_phys_get(inout g: Generic<UnicodeScalar>, x: Int) -> Int {
+func bound_generic_mono_phys_get(_ g: inout Generic<UnicodeScalar>, x: Int) -> Int {
   return g.mono_phys
   // CHECK: struct_element_addr %{{.*}}, #Generic.mono_phys
 }
 
 // CHECK-LABEL: sil hidden  @_TF10properties26bound_generic_mono_log_get
-func bound_generic_mono_log_get(g: Generic<UnicodeScalar>, x: Int) -> Int {
+func bound_generic_mono_log_get(_ g: Generic<UnicodeScalar>, x: Int) -> Int {
   return g.mono_log
 // CHECK: [[GENERIC_GET_METHOD:%[0-9]+]] = function_ref @_TFV10properties7Genericg8mono_log
   // CHECK: apply [[GENERIC_GET_METHOD]]<
 }
 
 // CHECK-LABEL: sil hidden  @_TF10properties22generic_subscript_type
-func generic_subscript_type<T>(g: Generic<T>, i: T, x: T) -> T {
+func generic_subscript_type<T>(_ g: Generic<T>, i: T, x: T) -> T {
   var g = g
   g[i] = x
   return g[i]
@@ -441,18 +452,18 @@ struct StaticProperty {
 }
 
 // CHECK-LABEL: sil hidden @_TF10properties10static_get
-// CHECK:   function_ref @_TZFV10properties14StaticPropertyg3foo{{.*}} : $@convention(thin) (@thin StaticProperty.Type) -> Int
+// CHECK:   function_ref @_TZFV10properties14StaticPropertyg3foo{{.*}} : $@convention(method) (@thin StaticProperty.Type) -> Int
 func static_get() -> Int {
   return StaticProperty.foo
 }
 
 // CHECK-LABEL: sil hidden @_TF10properties10static_set
-// CHECK:   function_ref @_TZFV10properties14StaticPropertys3foo{{.*}} : $@convention(thin) (Int, @thin StaticProperty.Type) -> ()
-func static_set(x: Int) {
+// CHECK:   function_ref @_TZFV10properties14StaticPropertys3foo{{.*}} : $@convention(method) (Int, @thin StaticProperty.Type) -> ()
+func static_set(_ x: Int) {
   StaticProperty.foo = x
 }
 
-func takeInt(a : Int) {}
+func takeInt(_ a : Int) {}
 
 protocol ForceAccessors {
   var a: Int { get set }
@@ -507,7 +518,7 @@ struct DidSetWillSetTests: ForceAccessors {
       // CHECK-NEXT: // function_ref properties.zero.unsafeMutableAddressor : Swift.Int
       // CHECK-NEXT: [[ZEROFN:%.*]] = function_ref @_TF10propertiesau4zero
       // CHECK-NEXT: [[ZERORAW:%.*]] = apply [[ZEROFN]]() : $@convention(thin) () -> Builtin.RawPointer
-      // CHECK-NEXT: [[ZEROADDR:%.*]] = pointer_to_address [[ZERORAW]] : $Builtin.RawPointer to $*Int
+      // CHECK-NEXT: [[ZEROADDR:%.*]] = pointer_to_address [[ZERORAW]] : $Builtin.RawPointer to [strict] $*Int
       // CHECK-NEXT: [[AADDR:%.*]] = struct_element_addr [[PB]] : $*DidSetWillSetTests, #DidSetWillSetTests.a
       // CHECK-NEXT: copy_addr [[ZEROADDR]] to [[AADDR]] : $*Int
       // CHECK-NEXT: copy_addr [[PB]] to %1 : $*DidSetWillSetTests
@@ -528,7 +539,7 @@ struct DidSetWillSetTests: ForceAccessors {
   // CHECK: bb0(%0 : $DidSetWillSetTests):
   // CHECK-NEXT:   debug_value %0
   // CHECK-NEXT:   %2 = struct_extract %0 : $DidSetWillSetTests, #DidSetWillSetTests.a
-  // CHECK-NEXT:   return %2 : $Int                      // id: %3
+  // CHECK-NEXT:   return %2 : $Int{{.*}}                      // id: %3
   
   // CHECK-LABEL: // {{.*}}.DidSetWillSetTests.a.setter
   // CHECK-NEXT: sil hidden @_TFV10properties18DidSetWillSetTestss1a
@@ -602,7 +613,7 @@ func force_global_observing_property_setter() {
 
 // Test local observing properties.
 
-func local_observing_property(arg: Int) {
+func local_observing_property(_ arg: Int) {
   var localproperty: Int = arg {
     didSet {
       takeInt(localproperty)
@@ -719,7 +730,7 @@ class DerivedProperty : BaseProperty {
 // CHECK: bb0(%0 : $DerivedProperty):
 // CHECK:  [[BASEPTR:%[0-9]+]] = upcast %0 : $DerivedProperty to $BaseProperty
 // CHECK:  [[FN:%[0-9]+]] = function_ref @_TFC10properties12BasePropertyg1xSi : $@convention(method) (@guaranteed BaseProperty) -> Int 
-// CHECK:  apply [[FN]]([[BASEPTR]]) : $@convention(method) (@guaranteed BaseProperty) -> Int // user: %7
+// CHECK:  apply [[FN]]([[BASEPTR]]) : $@convention(method) (@guaranteed BaseProperty) -> Int{{.*}} // user: %7
 
 
 // <rdar://problem/16411449> ownership qualifiers don't work with non-mutating struct property
@@ -788,7 +799,7 @@ struct SomeGenericStruct<T> {
 
 // CHECK-LABEL: sil hidden @_TF10properties4getX
 // CHECK:         struct_extract {{%.*}} : $SomeGenericStruct<T>, #SomeGenericStruct.x
-func getX<T>(g: SomeGenericStruct<T>) -> Int {
+func getX<T>(_ g: SomeGenericStruct<T>) -> Int {
   return g.x
 }
 
@@ -839,7 +850,7 @@ struct StructWithClassProp : ProtoWithClassProp {
 }
 
 
-func getX<T : ProtoWithClassProp>(a : T) -> Int {
+func getX<T : ProtoWithClassProp>(_ a : T) -> Int {
   return T.x
 }
 
@@ -856,7 +867,7 @@ class GenericClass<T> {
 }
 
 // CHECK-LABEL: sil hidden @_TF10properties12genericPropsFGCS_12GenericClassSS_T_ 
-func genericProps(x: GenericClass<String>) {
+func genericProps(_ x: GenericClass<String>) {
   // CHECK: class_method %0 : $GenericClass<String>, #GenericClass.x!getter.1
   let _ = x.x
   // CHECK: class_method %0 : $GenericClass<String>, #GenericClass.y!getter.1
@@ -867,7 +878,7 @@ func genericProps(x: GenericClass<String>) {
 }
 
 // CHECK-LABEL: sil hidden @_TF10properties28genericPropsInGenericContext
-func genericPropsInGenericContext<U>(x: GenericClass<U>) {
+func genericPropsInGenericContext<U>(_ x: GenericClass<U>) {
   // CHECK: [[Z:%.*]] = ref_element_addr %0 : $GenericClass<U>, #GenericClass.z
   // CHECK: copy_addr [[Z]] {{.*}} : $*U
   let _ = x.z
@@ -973,7 +984,7 @@ struct AddressOnlyNonmutatingSet<T> {
   }
 }
 
-func addressOnlyNonmutatingProperty<T>(x: AddressOnlyNonmutatingSet<T>)
+func addressOnlyNonmutatingProperty<T>(_ x: AddressOnlyNonmutatingSet<T>)
 -> Int {
   x.prop = 0
   return x.prop
@@ -1000,7 +1011,7 @@ struct AddressOnlyReadOnlySubscript {
 // CHECK:         copy_addr [[BASE:%.*]] to [initialization] [[COPY:%.*]] :
 // CHECK:         [[GETTER:%.*]] = function_ref @_TFV10properties28AddressOnlyReadOnlySubscriptg9subscript
 // CHECK:         apply [[GETTER]]({{%.*}}, [[COPY]])
-func addressOnlyReadOnlySubscriptFromMutableBase(x: Int) {
+func addressOnlyReadOnlySubscriptFromMutableBase(_ x: Int) {
   var base = AddressOnlyReadOnlySubscript()
   _ = base[x]
 }
@@ -1032,3 +1043,27 @@ protocol ProtocolWithReadWriteSubscript {
 struct CrashWithUnnamedSubscript : ProtocolWithReadWriteSubscript {
   subscript(_: Int) -> Int { get { } set { } }
 }
+
+
+/// <rdar://problem/26408353> crash when overriding internal property with
+/// public property
+
+public class BaseClassWithInternalProperty {
+  var x: () = ()
+}
+
+public class DerivedClassWithPublicProperty : BaseClassWithInternalProperty {
+  public override var x: () {
+    didSet {}
+  }
+}
+
+// CHECK-LABEL: sil hidden [transparent] @_TFC10properties29BaseClassWithInternalPropertyg1xT_
+
+// CHECK-LABEL: sil [transparent] [fragile] @_TFC10properties30DerivedClassWithPublicPropertyg1xT_
+// CHECK:       bb0([[SELF:%.*]] : $DerivedClassWithPublicProperty):
+// CHECK:         strong_retain [[SELF]] : $DerivedClassWithPublicProperty
+// CHECK-NEXT:    [[SUPER:%.*]] = upcast [[SELF]] : $DerivedClassWithPublicProperty to $BaseClassWithInternalProperty
+// CHECK-NEXT:    [[METHOD:%.*]] = super_method [[SELF]] : $DerivedClassWithPublicProperty, #BaseClassWithInternalProperty.x!getter.1 : (BaseClassWithInternalProperty) -> () -> () , $@convention(method) (@guaranteed BaseClassWithInternalProperty) -> ()
+// CHECK-NEXT:    [[RESULT:%.*]] = apply [[METHOD]]([[SUPER]]) : $@convention(method) (@guaranteed BaseClassWithInternalProperty) -> ()
+// CHECK-NEXT:    strong_release [[SUPER]] : $BaseClassWithInternalProperty

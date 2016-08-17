@@ -4,8 +4,8 @@
 // RUN: mkdir %t
 // RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -I %S/Inputs/custom-modules/ -emit-module -o %t %s -disable-objc-attr-requires-foundation-module
 // RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -I %S/Inputs/custom-modules/ -parse-as-library %t/imports.swiftmodule -parse -emit-objc-header-path %t/imports.h -import-objc-header %S/../Inputs/empty.h -disable-objc-attr-requires-foundation-module
-// RUN: FileCheck %s < %t/imports.h
-// RUN: FileCheck -check-prefix=NEGATIVE %s < %t/imports.h
+// RUN: %FileCheck %s < %t/imports.h
+// RUN: %FileCheck -check-prefix=NEGATIVE %s < %t/imports.h
 // RUN: %check-in-clang %t/imports.h -I %S/Inputs/custom-modules/
 
 // REQUIRES: objc_interop
@@ -34,7 +34,7 @@ import Base.ExplicitSub.ExSub
 
 @objc class Test {
   let word: DWORD = 0
-  let number: NSTimeInterval = 0.0
+  let number: TimeInterval = 0.0
 
   let baseI: BaseI = 0
   let baseII: BaseII = 0

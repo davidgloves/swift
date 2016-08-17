@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -sdk %S/Inputs -emit-silgen -I %S/Inputs -enable-source-import %s -disable-objc-attr-requires-foundation-module | FileCheck %s
+// RUN: %target-swift-frontend -sdk %S/Inputs -emit-silgen -I %S/Inputs -enable-source-import %s -disable-objc-attr-requires-foundation-module | %FileCheck %s
 
 // FIXME: rdar://problem/19648117 Needs splitting objc parts out
 // XFAIL: linux
@@ -151,11 +151,11 @@ class Observed {
 
 // rdar://problem/21298214
 class BaseWithDefaults {
-   func a(object: AnyObject? = nil) {}
+   func a(_ object: AnyObject? = nil) {}
 }
 
 class DerivedWithoutDefaults : BaseWithDefaults {
-   override func a(object: AnyObject?) { 
+   override func a(_ object: AnyObject?) { 
      super.a(object)   
    }
 }

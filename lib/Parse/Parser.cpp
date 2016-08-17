@@ -444,16 +444,16 @@ SourceLoc Parser::skipUntilGreaterInTypeList(bool protocolComposition) {
     case tok::eof:
     case tok::l_brace:
     case tok::r_brace:
-    case tok::pound_endif:
     case tok::code_complete:
       return lastLoc;
 
 #define KEYWORD(X) case tok::kw_##X:
+#define POUND_KEYWORD(X) case tok::pound_##X:
 #include "swift/Parse/Tokens.def"
     // 'Self' can appear in types, skip it.
     if (Tok.is(tok::kw_Self))
       break;
-    if (isStartOfStmt() || isStartOfDecl())
+    if (isStartOfStmt() || isStartOfDecl() || Tok.is(tok::pound_endif))
       return lastLoc;
     break;
 
@@ -500,21 +500,22 @@ void Parser::skipUntilDeclRBrace(tok T1, tok T2) {
   }
 }
 
-void Parser::skipUntilConfigBlockClose() {
+void Parser::skipUntilConditionalBlockClose() {
   while (Tok.isNot(tok::pound_else, tok::pound_elseif, tok::pound_endif,
                    tok::eof)) {
     skipSingle();
   }
 }
 
-bool Parser::parseConfigEndIf(SourceLoc &Loc) {
+bool Parser::parseEndIfDirective(SourceLoc &Loc) {
   Loc = Tok.getLoc();
-  if (parseToken(tok::pound_endif, diag::expected_close_to_config_stmt)) {
+  if (parseToken(tok::pound_endif, diag::expected_close_to_if_directive)) {
     Loc = PreviousLoc;
-    skipUntilConfigBlockClose();
+    skipUntilConditionalBlockClose();
     return true;
   } else if (!Tok.isAtStartOfLine() && Tok.isNot(tok::eof))
-    diagnose(Tok.getLoc(), diag::extra_tokens_config_directive);
+    diagnose(Tok.getLoc(),
+             diag::extra_tokens_conditional_compilation_directive);
   return false;
 }
 
@@ -567,6 +568,17 @@ bool Parser::parseIdentifier(Identifier &Result, SourceLoc &Loc,
   }
 }
 
+bool Parser::parseSpecificIdentifier(StringRef expected, SourceLoc &loc,
+                                     const Diagnostic &D) {
+  if (Tok.getText() != expected) {
+    diagnose(Tok, D);
+    return true;
+  }
+  loc = consumeToken(tok::identifier);
+  return false;
+}
+
+
 /// parseAnyIdentifier - Consume an identifier or operator if present and return
 /// its name in Result.  Otherwise, emit an error and return true.
 bool Parser::parseAnyIdentifier(Identifier &Result, SourceLoc &Loc,
@@ -588,7 +600,15 @@ bool Parser::parseAnyIdentifier(Identifier &Result, SourceLoc &Loc,
   }
 
   checkForInputIncomplete();
-  diagnose(Tok, D);
+
+  if (Tok.isKeyword()) {
+    diagnose(Tok, diag::keyword_cant_be_identifier, Tok.getText());
+    diagnose(Tok, diag::backticks_to_escape)
+      .fixItReplace(Tok.getLoc(), "`" + Tok.getText().str() + "`");
+  } else {
+    diagnose(Tok, D);
+  }
+
   return true;
 }
 
@@ -659,11 +679,17 @@ Parser::parseList(tok RightK, SourceLoc LeftLoc, SourceLoc &RightLoc,
       RightLoc = Tok.getLoc();
       return Status;
     }
+    SourceLoc SepLoc = Tok.getLoc();
     if (consumeIf(SeparatorK)) {
-      if (AllowSepAfterLast && Tok.is(RightK))
+      if (Tok.is(RightK)) {
+        if (!AllowSepAfterLast) {
+          diagnose(Tok, diag::unexpected_separator,
+                   SeparatorK == tok::comma ? "," : ";")
+            .fixItRemove(SourceRange(SepLoc));
+        }
         break;
-      else
-        continue;
+      }
+      continue;
     }
     if (!OptionalSep) {
       // If we're in a comma-separated list and the next token starts a new
@@ -779,66 +805,137 @@ SourceFile &ParserUnit::getSourceFile() {
   return *Impl.SF;
 }
 
-ConfigParserState swift::operator&&(ConfigParserState lhs,
-                                     ConfigParserState rhs) {
-  return ConfigParserState(lhs.isConditionActive() && rhs.isConditionActive(),
-                           ConfigExprKind::Binary);
+ConditionalCompilationExprState
+swift::operator&&(ConditionalCompilationExprState lhs,
+                  ConditionalCompilationExprState rhs) {
+  return {lhs.isConditionActive() && rhs.isConditionActive(),
+          ConditionalCompilationExprKind::Binary};
 }
 
-ConfigParserState swift::operator||(ConfigParserState lhs,
-                                    ConfigParserState rhs) {
-  return ConfigParserState(lhs.isConditionActive() || rhs.isConditionActive(),
-                           ConfigExprKind::Binary);
+ConditionalCompilationExprState
+swift::operator||(ConditionalCompilationExprState lhs,
+                  ConditionalCompilationExprState rhs) {
+  return {lhs.isConditionActive() || rhs.isConditionActive(),
+          ConditionalCompilationExprKind::Binary};
 }
 
-ConfigParserState swift::operator!(ConfigParserState Result) {
-  return ConfigParserState(!Result.isConditionActive(), Result.getKind());
+ConditionalCompilationExprState
+swift::operator!(ConditionalCompilationExprState state) {
+  return {!state.isConditionActive(), state.getKind()};
 }
 
-/// Parse a stringified Swift declaration name, e.g. "init(frame:)".
-StringRef swift::parseDeclName(StringRef name,
-                               SmallVectorImpl<StringRef> &argumentLabels,
-                               bool &isFunctionName) {
-  if (name.empty()) return "";
+ParsedDeclName swift::parseDeclName(StringRef name) {
+  if (name.empty()) return ParsedDeclName();
 
+  // Local function to handle the parsing of the base name + context.
+  //
+  // Returns true if an error occurred, without recording the base name.
+  ParsedDeclName result;
+  auto parseBaseName = [&](StringRef text) -> bool {
+    // Split the text into context name and base name.
+    StringRef contextName, baseName;
+    std::tie(contextName, baseName) = text.rsplit('.');
+    if (baseName.empty()) {
+      baseName = contextName;
+      contextName = StringRef();
+    } else if (contextName.empty()) {
+      return true;
+    }
+
+    auto isValidIdentifier = [](StringRef text) -> bool {
+      return Lexer::isIdentifier(text) && text != "_";
+    };
+
+    // Make sure we have an identifier for the base name.
+    if (!isValidIdentifier(baseName))
+      return true;
+
+    // If we have a context, make sure it is an identifier, or a series of
+    // dot-separated identifiers.
+    // FIXME: What about generic parameters?
+    if (!contextName.empty()) {
+      StringRef first;
+      StringRef rest = contextName;
+      do {
+        std::tie(first, rest) = rest.split('.');
+        if (!isValidIdentifier(first))
+          return true;
+      } while (!rest.empty());
+    }
+
+    // Record the results.
+    result.ContextName = contextName;
+    result.BaseName = baseName;
+    return false;
+  };
+
+  // If this is not a function name, just parse the base name and
+  // we're done.
   if (name.back() != ')') {
-    isFunctionName = false;
-    if (Lexer::isIdentifier(name) && name != "_")
-      return name;
-
-    return "";
+    if (Lexer::isOperator(name))
+      result.BaseName = name;
+    else if (parseBaseName(name))
+      return ParsedDeclName();
+    return result;
   }
 
-  isFunctionName = true;
+  // We have a function name.
+  result.IsFunctionName = true;
 
-  StringRef BaseName, Parameters;
-  std::tie(BaseName, Parameters) = name.split('(');
-  if (!Lexer::isIdentifier(BaseName) || BaseName == "_")
-    return "";
+  // Split the base name from the parameters.
+  StringRef baseName, parameters;
+  std::tie(baseName, parameters) = name.split('(');
+  if (parameters.empty()) return ParsedDeclName();
 
-  if (Parameters.empty())
-    return "";
-  Parameters = Parameters.drop_back(); // ')'
+  // If the base name is prefixed by "getter:" or "setter:", it's an
+  // accessor.
+  if (baseName.startswith("getter:")) {
+    result.IsGetter = true;
+    result.IsFunctionName = false;
+    baseName = baseName.substr(7);
+  } else if (baseName.startswith("setter:")) {
+    result.IsSetter = true;
+    result.IsFunctionName = false;
+    baseName = baseName.substr(7);
+  }
 
-  if (Parameters.empty())
-    return BaseName;
+  // Parse the base name.
+  if (parseBaseName(baseName)) return ParsedDeclName();
 
-  if (Parameters.back() != ':')
-    return "";
+  parameters = parameters.drop_back(); // ')'
+  if (parameters.empty()) return result;
 
+  if (parameters.back() != ':')
+    return ParsedDeclName();
+
+  bool isMember = !result.ContextName.empty();
   do {
     StringRef NextParam;
-    std::tie(NextParam, Parameters) = Parameters.split(':');
+    std::tie(NextParam, parameters) = parameters.split(':');
 
     if (!Lexer::isIdentifier(NextParam))
-      return "";
-    if (NextParam == "_")
-      argumentLabels.push_back("");
-    else
-      argumentLabels.push_back(NextParam);
-  } while (!Parameters.empty());
+      return ParsedDeclName();
+    if (NextParam == "_") {
+      result.ArgumentLabels.push_back("");
+    } else if (isMember && NextParam == "self") {
+      // For a member, "self" indicates the self parameter. There can
+      // only be one such parameter.
+      if (result.SelfIndex) return ParsedDeclName();
+      result.SelfIndex = result.ArgumentLabels.size();
+    } else {
+      result.ArgumentLabels.push_back(NextParam);
+    }
+  } while (!parameters.empty());
 
-  return BaseName;
+  // Drop the argument labels for a property accessor; they aren't used.
+  if (result.isPropertyAccessor())
+    result.ArgumentLabels.clear();
+
+  return result;
+}
+
+DeclName ParsedDeclName::formDeclName(ASTContext &ctx) const {
+  return swift::formDeclName(ctx, BaseName, ArgumentLabels, IsFunctionName);
 }
 
 DeclName swift::formDeclName(ASTContext &ctx,
@@ -846,7 +943,9 @@ DeclName swift::formDeclName(ASTContext &ctx,
                              ArrayRef<StringRef> argumentLabels,
                              bool isFunctionName) {
   // We cannot import when the base name is not an identifier.
-  if (baseName.empty() || !Lexer::isIdentifier(baseName))
+  if (baseName.empty())
+    return DeclName();
+  if (!Lexer::isIdentifier(baseName) && !Lexer::isOperator(baseName))
     return DeclName();
 
   // Get the identifier for the base name.
@@ -873,11 +972,5 @@ DeclName swift::formDeclName(ASTContext &ctx,
 }
 
 DeclName swift::parseDeclName(ASTContext &ctx, StringRef name) {
-  // Parse the name string.
-  SmallVector<StringRef, 4> argumentLabels;
-  bool isFunctionName;
-  StringRef baseName = parseDeclName(name, argumentLabels, isFunctionName);
-
-  // Form the result.
-  return formDeclName(ctx, baseName, argumentLabels, isFunctionName);
+  return parseDeclName(name).formDeclName(ctx);
 }

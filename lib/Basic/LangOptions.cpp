@@ -23,52 +23,72 @@
 
 using namespace swift;
 
-const std::vector<std::string> LangOptions::SupportedOSBuildConfigArguments = {
+static const StringRef SupportedConditionalCompilationOSs[] = {
   "OSX",
   "tvOS",
   "watchOS",
   "iOS",
   "Linux",
-  "FreeBSD"
+  "FreeBSD",
+  "Windows",
+  "Android",
+  "PS4",
 };
 
-const std::vector<std::string> LangOptions::SupportedArchBuildConfigArguments = {
+static const StringRef SupportedConditionalCompilationArches[] = {
   "arm",
   "arm64",
   "i386",
   "x86_64",
   "powerpc64",
-  "powerpc64le"
+  "powerpc64le",
+  "s390x"
 };
 
-bool LangOptions::isOSBuildConfigSupported(llvm::StringRef OSName) {
-  auto foundIt = std::find(SupportedOSBuildConfigArguments.begin(),
-                           SupportedOSBuildConfigArguments.end(), OSName);
-  return foundIt != SupportedOSBuildConfigArguments.end();
+static const StringRef SupportedConditionalCompilationEndianness[] = {
+  "little",
+  "big"
+};
+
+template <typename Type, size_t N>
+bool contains(const Type (&Array)[N], const Type &V) {
+  return std::find(std::begin(Array), std::end(Array), V) != std::end(Array);
 }
 
-bool LangOptions::isArchBuildConfigSupported(llvm::StringRef ArchName) {
-  auto foundIt = std::find(SupportedArchBuildConfigArguments.begin(),
-                           SupportedArchBuildConfigArguments.end(), ArchName);
-  return foundIt != SupportedArchBuildConfigArguments.end();
+bool LangOptions::checkPlatformConditionOS(StringRef &OSName) {
+  if (OSName == "macOS")
+    OSName = "OSX";
+  return contains(SupportedConditionalCompilationOSs, OSName);
 }
 
-StringRef LangOptions::getTargetConfigOption(StringRef Name) const {
+bool
+LangOptions::isPlatformConditionArchSupported(StringRef ArchName) {
+  return contains(SupportedConditionalCompilationArches, ArchName);
+}
+
+bool
+LangOptions::isPlatformConditionEndiannessSupported(StringRef Endianness) {
+  return contains(SupportedConditionalCompilationEndianness, Endianness);
+}
+
+StringRef
+LangOptions::getPlatformConditionValue(StringRef Name) const {
   // Last one wins.
-  for (auto &Opt : reversed(TargetConfigOptions)) {
+  for (auto &Opt : reversed(PlatformConditionValues)) {
     if (Opt.first == Name)
       return Opt.second;
   }
   return StringRef();
 }
 
-bool LangOptions::hasBuildConfigOption(StringRef Name) const {
-  return std::find(BuildConfigOptions.begin(), BuildConfigOptions.end(), Name)
-      != BuildConfigOptions.end();
+bool LangOptions::isCustomConditionalCompilationFlagSet(StringRef Name) const {
+  return std::find(CustomConditionalCompilationFlags.begin(),
+                   CustomConditionalCompilationFlags.end(), Name)
+      != CustomConditionalCompilationFlags.end();
 }
 
 std::pair<bool, bool> LangOptions::setTarget(llvm::Triple triple) {
-  clearAllTargetConfigOptions();
+  clearAllPlatformConditionValues();
 
   if (triple.getOS() == llvm::Triple::Darwin &&
       triple.getVendor() == llvm::Triple::Apple) {
@@ -90,44 +110,53 @@ std::pair<bool, bool> LangOptions::setTarget(llvm::Triple triple) {
 
   bool UnsupportedOS = false;
 
-  // Set the "os" target configuration.
+  // Set the "os" platform condition.
   if (Target.isMacOSX())
-    addTargetConfigOption("os", "OSX");
+    addPlatformConditionValue("os", "OSX");
   else if (triple.isTvOS())
-    addTargetConfigOption("os", "tvOS");
+    addPlatformConditionValue("os", "tvOS");
   else if (triple.isWatchOS())
-    addTargetConfigOption("os", "watchOS");
+    addPlatformConditionValue("os", "watchOS");
   else if (triple.isiOS())
-    addTargetConfigOption("os", "iOS");
+    addPlatformConditionValue("os", "iOS");
+  else if (triple.isAndroid())
+    addPlatformConditionValue("os", "Android");
   else if (triple.isOSLinux())
-    addTargetConfigOption("os", "Linux");
+    addPlatformConditionValue("os", "Linux");
   else if (triple.isOSFreeBSD())
-    addTargetConfigOption("os", "FreeBSD");
-  else {
+    addPlatformConditionValue("os", "FreeBSD");
+  else if (triple.isOSWindows())
+    addPlatformConditionValue("os", "Windows");
+  else if (triple.isPS4())
+    addPlatformConditionValue("os", "PS4");
+  else
     UnsupportedOS = true;
-  }
 
   bool UnsupportedArch = false;
 
-  // Set the "arch" target configuration.
+  // Set the "arch" platform condition.
   switch (Target.getArch()) {
   case llvm::Triple::ArchType::arm:
-    addTargetConfigOption("arch", "arm");
+  case llvm::Triple::ArchType::thumb:
+    addPlatformConditionValue("arch", "arm");
     break;
   case llvm::Triple::ArchType::aarch64:
-    addTargetConfigOption("arch", "arm64");
+    addPlatformConditionValue("arch", "arm64");
     break;
   case llvm::Triple::ArchType::ppc64:
-    addTargetConfigOption("arch", "powerpc64");
+    addPlatformConditionValue("arch", "powerpc64");
     break;
   case llvm::Triple::ArchType::ppc64le:
-    addTargetConfigOption("arch", "powerpc64le");
+    addPlatformConditionValue("arch", "powerpc64le");
     break;
   case llvm::Triple::ArchType::x86:
-    addTargetConfigOption("arch", "i386");
+    addPlatformConditionValue("arch", "i386");
     break;
   case llvm::Triple::ArchType::x86_64:
-    addTargetConfigOption("arch", "x86_64");
+    addPlatformConditionValue("arch", "x86_64");
+    break;
+  case llvm::Triple::ArchType::systemz:
+    addPlatformConditionValue("arch", "s390x");
     break;
   default:
     UnsupportedArch = true;
@@ -136,11 +165,43 @@ std::pair<bool, bool> LangOptions::setTarget(llvm::Triple triple) {
   if (UnsupportedOS || UnsupportedArch)
     return { UnsupportedOS, UnsupportedArch };
 
-  // Set the "runtime" target configuration.
+  // Set the "_endian" platform condition.
+  switch (Target.getArch()) {
+  case llvm::Triple::ArchType::arm:
+  case llvm::Triple::ArchType::thumb:
+    addPlatformConditionValue("_endian", "little");
+    break;
+  case llvm::Triple::ArchType::aarch64:
+    addPlatformConditionValue("_endian", "little");
+    break;
+  case llvm::Triple::ArchType::ppc64:
+    addPlatformConditionValue("_endian", "big");
+    break;
+  case llvm::Triple::ArchType::ppc64le:
+    addPlatformConditionValue("_endian", "little");
+    break;
+  case llvm::Triple::ArchType::x86:
+    addPlatformConditionValue("_endian", "little");
+    break;
+  case llvm::Triple::ArchType::x86_64:
+    addPlatformConditionValue("_endian", "little");
+    break;
+  case llvm::Triple::ArchType::systemz:
+    addPlatformConditionValue("_endian", "big");
+    break;
+  default:
+    llvm_unreachable("undefined architecture endianness");
+  }
+
+  // Set the "runtime" platform condition.
   if (EnableObjCInterop)
-    addTargetConfigOption("_runtime", "_ObjC");
+    addPlatformConditionValue("_runtime", "_ObjC");
   else
-    addTargetConfigOption("_runtime", "_Native");
+    addPlatformConditionValue("_runtime", "_Native");
+
+  // If you add anything to this list, change the default size of
+  // PlatformConditionValues to not require an extra allocation
+  // in the common case.
 
   return { false, false };
 }

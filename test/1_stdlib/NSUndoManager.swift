@@ -1,5 +1,5 @@
 // TODO: Relies on AnyObject lvalues <rdar://problem/17755906>
-// R/UN: %target-run-simple-swift | FileCheck %s
+// R/UN: %target-run-simple-swift | %FileCheck %s
 // RUN: not %target-build-swift -parse
 // REQUIRES: executable_test
 
@@ -23,7 +23,7 @@ class Model : NSObject {
     }
   }
 
-  func print(message: String) {
+  func print(_ message: String) {
     print(message + ": \(value)")
   }
 }

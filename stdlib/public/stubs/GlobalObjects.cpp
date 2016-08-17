@@ -15,15 +15,18 @@
 //  defined here.
 //
 //===----------------------------------------------------------------------===//
+
 #include "../SwiftShims/GlobalObjects.h"
 #include "swift/Runtime/Metadata.h"
 
 namespace swift {
-
+// FIXME(ABI): does this declaration need SWIFT_RUNTIME_STDLIB_INTERFACE?
 // _direct type metadata for Swift._EmptyArrayStorage
+SWIFT_RUNTIME_STDLIB_INTERFACE
 extern "C" ClassMetadata _TMCs18_EmptyArrayStorage;
+}
 
-extern "C" _SwiftEmptyArrayStorage _swiftEmptyArrayStorage = {
+swift::_SwiftEmptyArrayStorage swift::_swiftEmptyArrayStorage = {
   // HeapObject header;
   {
     &_TMCs18_EmptyArrayStorage, // isa pointer
@@ -36,7 +39,11 @@ extern "C" _SwiftEmptyArrayStorage _swiftEmptyArrayStorage = {
   }
 };
 
-extern "C"
-uint64_t _swift_stdlib_HashingDetail_fixedSeedOverride = 0;
+__swift_uint64_t swift::_swift_stdlib_HashingDetail_fixedSeedOverride = 0;
 
-}
+namespace llvm { namespace hashing { namespace detail {
+  // An extern variable expected by LLVM's hashing templates. We don't link any
+  // LLVM libs into the runtime, so define this here.
+  size_t fixed_seed_override = 0;
+} } }
+

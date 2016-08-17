@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -I %S/../Inputs -enable-source-import -emit-silgen -enable-resilience %s | FileCheck %s
+// RUN: %target-swift-frontend -I %S/../Inputs -enable-source-import -emit-silgen -enable-resilience %s | %FileCheck %s
 
 import resilient_enum
 
@@ -34,7 +34,7 @@ import resilient_enum
 // CHECK-NEXT:    [[RESULT:%.*]] = tuple ()
 // CHECK-NEXT:    return [[RESULT]]
 
-func resilientSwitch(m: Medium) {
+func resilientSwitch(_ m: Medium) {
   switch m {
     case .Paper: ()
     case .Canvas: ()
@@ -48,4 +48,4 @@ func resilientSwitch(m: Medium) {
 // enum's size
 
 // CHECK-LABEL: sil hidden @_TF15enum_resilience21indirectResilientEnumFO14resilient_enum16IndirectApproachT_ : $@convention(thin) (@in IndirectApproach) -> ()
-func indirectResilientEnum(ia: IndirectApproach) {}
+func indirectResilientEnum(_ ia: IndirectApproach) {}

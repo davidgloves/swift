@@ -14,7 +14,6 @@
 #include "SILCombiner.h"
 #include "swift/SIL/DynamicCasts.h"
 #include "swift/SIL/PatternMatch.h"
-#include "swift/SIL/Projection.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILVisitor.h"
 #include "swift/SIL/DebugUtils.h"
@@ -223,8 +222,9 @@ static SILInstruction *createIndexAddrFrom(IndexRawPointerInst *I,
   SILType InstanceType =
     Metatype->getType().getMetatypeInstanceType(I->getModule());
 
+  // index_raw_pointer's address type is currently always strict.
   auto *NewPTAI = Builder.createPointerToAddress(
-    I->getLoc(), Ptr, InstanceType.getAddressType());
+    I->getLoc(), Ptr, InstanceType.getAddressType(), /*isStrict*/ true);
 
   auto *DistanceAsWord =
       Builder.createBuiltin(I->getLoc(), TruncOrBitCast->getName(),
@@ -249,7 +249,7 @@ SILInstruction *optimizeBuiltinArrayOperation(BuiltinInst *I,
   //     = builtin "takeArrayFrontToBack"<Int>(%metatype, %ptr', ...
 
   // And convert it to this:
-  //   %addr = pointer_to_address %ptr, $T
+  //   %addr = pointer_to_address %ptr, strict $*T
   //   %result = index_addr %addr, %distance
   //   %ptr' = address_to_pointer result : $RawPointer
   //     = builtin "takeArrayFrontToBack"<Int>(%metatype, %ptr', ...

@@ -22,8 +22,7 @@ namespace swift {
   struct SwiftAAResult : llvm::AAResultBase<SwiftAAResult> {
     friend llvm::AAResultBase<SwiftAAResult>;
 
-    explicit SwiftAAResult(const llvm::TargetLibraryInfo &TLI)
-        : AAResultBase(TLI) {}
+    explicit SwiftAAResult() : AAResultBase() {}
     SwiftAAResult(SwiftAAResult &&Arg)
         : AAResultBase(std::move(Arg)) {}
 
@@ -96,6 +95,13 @@ namespace swift {
     SwiftStackPromotion() : llvm::FunctionPass(ID) {}
   };
 
+  class InlineTreePrinter : public llvm::ModulePass {
+    virtual void getAnalysisUsage(llvm::AnalysisUsage &AU) const override;
+    virtual bool runOnModule(llvm::Module &M) override;
+  public:
+    static char ID;
+    InlineTreePrinter() : llvm::ModulePass(ID) {}
+  };
 
 } // end namespace swift
 

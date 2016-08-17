@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -parse-as-library -emit-silgen %s | FileCheck %s
+// RUN: %target-swift-frontend -Xllvm -sil-full-demangle -parse-as-library -emit-silgen %s | %FileCheck %s
 
 // CHECK-LABEL: sil hidden @_TF5decls11void_returnFT_T_
 // CHECK: = tuple
@@ -56,8 +56,7 @@ func tuple_patterns() {
   // CHECK: [[EFGH:%[0-9]+]] = apply
   // CHECK: [[E:%[0-9]+]] = tuple_extract {{.*}}, 0
   // CHECK: [[F:%[0-9]+]] = tuple_extract {{.*}}, 1
-  // CHECK: [[G:%[0-9]+]] = tuple_extract {{.*}}, 2
-  // CHECK: [[H:%[0-9]+]] = tuple_extract {{.*}}, 3
+  // CHECK: [[H:%[0-9]+]] = tuple_extract {{.*}}, 2
   // CHECK: store [[E]] to [[PBE]]
   // CHECK: store [[F]] to [[PBF]]
   // CHECK: store [[H]] to [[PBH]]
@@ -111,7 +110,7 @@ func tuple_argument(x: (Int, Float, ())) {
 // CHECK: [[YADDR:%[0-9]+]] = alloc_box $Int
 // CHECK: [[PBY:%[0-9]+]] = project_box [[YADDR]]
 // CHECK: copy_addr [[PBY]] to [[PBX]]
-func inout_argument(inout x: Int, y: Int) {
+func inout_argument(x: inout Int, y: Int) {
   var y = y
   x = y
 }
@@ -166,7 +165,7 @@ struct StructWithStaticVar {
 
 // <rdar://problem/17405715> lazy property crashes silgen of implicit memberwise initializer
 // CHECK-LABEL: // decls.StructWithLazyField.init
-// CHECK-NEXT: sil hidden @_TFV5decls19StructWithLazyFieldC{{.*}} : $@convention(thin) (Optional<Int>, @thin StructWithLazyField.Type) -> @owned StructWithLazyField {
+// CHECK-NEXT: sil hidden @_TFV5decls19StructWithLazyFieldC{{.*}} : $@convention(method) (Optional<Int>, @thin StructWithLazyField.Type) -> @owned StructWithLazyField {
 struct StructWithLazyField {
   lazy var once : Int = 42
   let someProp = "Some value"

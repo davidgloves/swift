@@ -32,6 +32,7 @@
 #include "swift/Driver/OutputFileMap.h"
 #include "swift/Driver/ToolChain.h"
 #include "swift/Option/Options.h"
+#include "swift/Option/SanitizerOptions.h"
 #include "swift/Parse/Lexer.h"
 #include "swift/Config.h"
 #include "llvm/ADT/DenseSet.h"
@@ -94,6 +95,7 @@ void Driver::parseDriverKind(ArrayRef<const char *> Args) {
   .Case("swift", DriverKind::Interactive)
   .Case("swiftc", DriverKind::Batch)
   .Case("swift-autolink-extract", DriverKind::AutolinkExtract)
+  .Case("swift-format", DriverKind::SwiftFormat)
   .Default(None);
   
   if (Kind.hasValue())
@@ -224,8 +226,7 @@ static bool populateOutOfDateMap(InputInfoMap &map, StringRef argsHashStr,
       return true;
 
     auto seqI = seq->begin(), seqE = seq->end();
-    // FIXME: operator== is not implemented.
-    if (!(seqI != seqE))
+    if (seqI == seqE)
       return true;
 
     auto *secondsRaw = dyn_cast<yaml::ScalarNode>(&*seqI);
@@ -236,8 +237,7 @@ static bool populateOutOfDateMap(InputInfoMap &map, StringRef argsHashStr,
       return true;
 
     ++seqI;
-    // FIXME: operator== is not implemented.
-    if (!(seqI != seqE))
+    if (seqI == seqE)
       return true;
 
     auto *nanosecondsRaw = dyn_cast<yaml::ScalarNode>(&*seqI);
@@ -843,14 +843,14 @@ static bool isSDKTooOld(StringRef sdkPath, clang::VersionTuple minVersion,
 /// the given target.
 static bool isSDKTooOld(StringRef sdkPath, const llvm::Triple &target) {
   if (target.isMacOSX()) {
-    return isSDKTooOld(sdkPath, clang::VersionTuple(10, 11), "OSX");
+    return isSDKTooOld(sdkPath, clang::VersionTuple(10, 12), "OSX");
 
   } else if (target.isiOS()) {
     // Includes both iOS and TVOS.
-    return isSDKTooOld(sdkPath, clang::VersionTuple(9, 0), "Simulator", "OS");
+    return isSDKTooOld(sdkPath, clang::VersionTuple(10, 0), "Simulator", "OS");
 
-  } else if(target.isWatchOS()) {
-    return isSDKTooOld(sdkPath, clang::VersionTuple(2, 0), "Simulator", "OS");
+  } else if (target.isWatchOS()) {
+    return isSDKTooOld(sdkPath, clang::VersionTuple(3, 0), "Simulator", "OS");
 
   } else {
     return false;
@@ -976,6 +976,8 @@ void Driver::buildOutputInfo(const ToolChain &TC, const DerivedArgList &Args,
       OI.DebugInfoKind = IRGenDebugInfoKind::Normal;
     else if (A->getOption().matches(options::OPT_gline_tables_only))
       OI.DebugInfoKind = IRGenDebugInfoKind::LineTables;
+    else if (A->getOption().matches(options::OPT_gdwarf_types))
+      OI.DebugInfoKind = IRGenDebugInfoKind::DwarfTypes;
     else
       assert(A->getOption().matches(options::OPT_gnone) &&
              "unknown -g<kind> option");
@@ -986,7 +988,7 @@ void Driver::buildOutputInfo(const ToolChain &TC, const DerivedArgList &Args,
     // top-level output.
     OI.ShouldGenerateModule = true;
     OI.ShouldTreatModuleAsTopLevelOutput = true;
-  } else if ((OI.DebugInfoKind == IRGenDebugInfoKind::Normal &&
+  } else if ((OI.DebugInfoKind > IRGenDebugInfoKind::LineTables &&
               OI.shouldLink()) ||
              Args.hasArg(options::OPT_emit_objc_header,
                          options::OPT_emit_objc_header_path)) {
@@ -1101,6 +1103,15 @@ void Driver::buildOutputInfo(const ToolChain &TC, const DerivedArgList &Args,
       }
     }
   }
+
+  OI.SelectedSanitizer = SanitizerKind::None;
+  if (const Arg *A = Args.getLastArg(options::OPT_sanitize_EQ))
+    OI.SelectedSanitizer = parseSanitizerArgValues(A, TC.getTriple(), Diags);
+
+  // Check that the sanitizer coverage flags are supported if supplied.
+  if (const Arg *A = Args.getLastArg(options::OPT_sanitize_coverage_EQ))
+    (void)parseSanitizerCoverageArgValue(A, TC.getTriple(), Diags,
+                                         OI.SelectedSanitizer);
 }
 
 void Driver::buildActions(const ToolChain &TC,
@@ -1306,7 +1317,8 @@ void Driver::buildActions(const ToolChain &TC,
   if (OI.shouldLink() && !AllLinkerInputs.empty()) {
     auto *LinkAction = new LinkJobAction(AllLinkerInputs, OI.LinkAction);
 
-    if (TC.getTriple().getObjectFormat() == llvm::Triple::ELF) {
+    if (TC.getTriple().getObjectFormat() == llvm::Triple::ELF ||
+        TC.getTriple().isOSCygMing()) {
       // On ELF platforms there's no built in autolinking mechanism, so we
       // pull the info we need from the .o files directly and pass them as an
       // argument input file to the linker.
@@ -1594,36 +1606,40 @@ handleCompileJobCondition(Job *J, CompileJobAction::InputInfo inputInfo,
     return;
   }
 
-  if (!alwaysRebuildDependents) {
-    // Default all non-newly added files to being rebuilt without cascading.
-    J->setCondition(Job::Condition::RunWithoutCascading);
-  }
-
+  bool hasValidModTime = false;
   llvm::sys::fs::file_status inputStatus;
-  if (llvm::sys::fs::status(input, inputStatus))
-    return;
-
-  J->setInputModTime(inputStatus.getLastModificationTime());
-  if (J->getInputModTime() != inputInfo.previousModTime)
-    return;
+  if (!llvm::sys::fs::status(input, inputStatus)) {
+    J->setInputModTime(inputStatus.getLastModificationTime());
+    hasValidModTime = true;
+  }
 
   Job::Condition condition;
-  switch (inputInfo.status) {
-  case CompileJobAction::InputInfo::UpToDate:
-    if (!llvm::sys::fs::exists(J->getOutput().getPrimaryOutputFilename()))
+  if (hasValidModTime && J->getInputModTime() == inputInfo.previousModTime) {
+    switch (inputInfo.status) {
+    case CompileJobAction::InputInfo::UpToDate:
+      if (llvm::sys::fs::exists(J->getOutput().getPrimaryOutputFilename()))
+        condition = Job::Condition::CheckDependencies;
+      else
+        condition = Job::Condition::RunWithoutCascading;
+      break;
+    case CompileJobAction::InputInfo::NeedsCascadingBuild:
+      condition = Job::Condition::Always;
+      break;
+    case CompileJobAction::InputInfo::NeedsNonCascadingBuild:
       condition = Job::Condition::RunWithoutCascading;
-    else
-      condition = Job::Condition::CheckDependencies;
-    break;
-  case CompileJobAction::InputInfo::NeedsCascadingBuild:
-    condition = Job::Condition::Always;
-    break;
-  case CompileJobAction::InputInfo::NeedsNonCascadingBuild:
-    condition = Job::Condition::RunWithoutCascading;
-    break;
-  case CompileJobAction::InputInfo::NewlyAdded:
-    llvm_unreachable("handled above");
+      break;
+    case CompileJobAction::InputInfo::NewlyAdded:
+      llvm_unreachable("handled above");
+    }
+  } else {
+    if (alwaysRebuildDependents ||
+        inputInfo.status == CompileJobAction::InputInfo::NeedsCascadingBuild) {
+      condition = Job::Condition::Always;
+    } else {
+      condition = Job::Condition::RunWithoutCascading;
+    }
   }
+
   J->setCondition(condition);
 }
 
@@ -1999,6 +2015,7 @@ void Driver::printHelp(bool ShowHidden) const {
     break;
   case DriverKind::Batch:
   case DriverKind::AutolinkExtract:
+  case DriverKind::SwiftFormat:
     ExcludedFlagsBitmask |= options::NoBatchOption;
     break;
   }
@@ -2011,24 +2028,7 @@ void Driver::printHelp(bool ShowHidden) const {
 }
 
 static llvm::Triple computeTargetTriple(StringRef DefaultTargetTriple) {
-  llvm::Triple triple = llvm::Triple(DefaultTargetTriple);
-
-  // armv6l and armv7l (which come from linux) are mapped to armv6 and 
-  // armv7 (respectively) within llvm.  When a Triple is created by llvm,
-  // the string is preserved, which keeps the 'l'.  This extra character
-  // causes problems later down the line.
-  // By explicitly setting the architecture to the subtype that it aliases to,
-  // we remove that extra character while not introducing other side effects.
-  if (triple.getOS() == llvm::Triple::Linux) {
-    if (triple.getSubArch() == llvm::Triple::SubArchType::ARMSubArch_v7) {
-      triple.setArchName("armv7");
-    }
-    if (triple.getSubArch() == llvm::Triple::SubArchType::ARMSubArch_v6) {
-      triple.setArchName("armv6");
-    }
-  }
-
-  return triple;
+  return llvm::Triple(DefaultTargetTriple); 
 }
 
 const ToolChain *Driver::getToolChain(const ArgList &Args) const {
@@ -2045,8 +2045,17 @@ const ToolChain *Driver::getToolChain(const ArgList &Args) const {
       TC = new toolchains::Darwin(*this, Target);
       break;
     case llvm::Triple::Linux:
+      if (Target.isAndroid()) {
+        TC = new toolchains::Android(*this, Target);
+      } else {
+        TC = new toolchains::GenericUnix(*this, Target);
+      }
+      break;
     case llvm::Triple::FreeBSD:
       TC = new toolchains::GenericUnix(*this, Target);
+      break;
+    case llvm::Triple::Win32:
+      TC = new toolchains::Cygwin(*this, Target);
       break;
     default:
       TC = nullptr;

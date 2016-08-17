@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -emit-silgen %s | FileCheck %s
+// RUN: %target-swift-frontend -emit-silgen %s | %FileCheck %s
 
 // Test that we emit a call to super.init at the end of the initializer, when none has been previously added.
 
@@ -41,7 +41,7 @@ class SomeDerivedClass : Parent {
 // CHECK-LABEL: sil hidden @_TFC30auto_generated_super_init_call16SomeDerivedClassc{{.*}} : $@convention(method) (Bool, @owned SomeDerivedClass) -> @owned SomeDerivedClass    
 // CHECK: bb4:
 // CHECK: [[SELFLOAD:%[0-9]+]] = load [[SELF:%[0-9]+]] : $*SomeDerivedClass
-// CHECK: function_ref @_TFC30auto_generated_super_init_call6ParentcfT_S0_ : $@convention(method) (@owned Parent) -> @owned Parent /
+// CHECK: function_ref @_TFC30auto_generated_super_init_call6ParentcfT_S0_ : $@convention(method) (@owned Parent) -> @owned Parent,
 // CHECK-NEXT: apply
 // CHECK-NEXT: unchecked_ref_cast
 // CHECK-NEXT: store

@@ -311,13 +311,22 @@ bool DIMemoryUse::
 onlyTouchesTrivialElements(const DIMemoryObjectInfo &MI) const {
   auto &Module = Inst->getModule();
   
-  for (unsigned i = FirstElement, e = i+NumElements; i != e; ++i){
+  for (unsigned i = FirstElement, e = i+NumElements; i != e; ++i) {
     // Skip 'super.init' bit
     if (i == MI.getNumMemoryElements())
       return false;
 
     auto EltTy = MI.getElementType(i);
-    if (!SILType::getPrimitiveObjectType(EltTy).isTrivial(Module))
+
+    auto SILEltTy = EltTy;
+    // We are getting the element type from a compound type. This might not be a
+    // legal SIL type. Lower the type if it is not a legal type.
+    if (!SILEltTy->isLegalSILType())
+      SILEltTy = MI.MemoryInst->getModule()
+                     .Types.getLoweredType(EltTy, 0)
+                     .getSwiftRValueType();
+
+    if (!SILType::getPrimitiveObjectType(SILEltTy).isTrivial(Module))
       return false;
   }
   return true;
@@ -695,6 +704,19 @@ void ElementUseCollector::collectUses(SILValue Pointer, unsigned BaseEltNo) {
       auto FTI = Apply->getSubstCalleeType();
       unsigned ArgumentNumber = UI->getOperandNumber()-1;
 
+      // If this is an out-parameter, it is like a store.
+      unsigned NumIndirectResults = FTI->getNumIndirectResults();
+      if (ArgumentNumber < NumIndirectResults) {
+        assert(!InStructSubElement && "We're initializing sub-members?");
+        addElementUses(BaseEltNo, PointeeType, User,
+                       DIUseKind::Initialization);
+        continue;
+
+      // Otherwise, adjust the argument index.      
+      } else {
+        ArgumentNumber -= NumIndirectResults;
+      }
+
       auto ParamConvention = FTI->getParameters()[ArgumentNumber]
         .getConvention();
 
@@ -709,13 +731,6 @@ void ElementUseCollector::collectUses(SILValue Pointer, unsigned BaseEltNo) {
       case ParameterConvention::Indirect_In:
       case ParameterConvention::Indirect_In_Guaranteed:
         addElementUses(BaseEltNo, PointeeType, User, DIUseKind::IndirectIn);
-        continue;
-
-      // If this is an out-parameter, it is like a store.
-      case ParameterConvention::Indirect_Out:
-        assert(!InStructSubElement && "We're initializing sub-members?");
-        addElementUses(BaseEltNo, PointeeType, User,
-                       DIUseKind::Initialization);
         continue;
 
       // If this is an @inout parameter, it is like both a load and store.
@@ -1016,8 +1031,8 @@ static SILInstruction *isSuperInitUse(UpcastInst *Inst) {
       // If we're reading a .sil file, treat a call to "superinit" as a
       // super.init call as a hack to allow us to write testcases.
       auto *AI = dyn_cast<ApplyInst>(inst);
-      if (AI && inst->getLoc().is<SILFileLocation>())
-        if (auto *Fn = AI->getCalleeFunction())
+      if (AI && inst->getLoc().isSILFile())
+        if (auto *Fn = AI->getReferencedFunction())
           if (Fn->getName() == "superinit")
             return inst;
       continue;
@@ -1055,9 +1070,9 @@ static SILInstruction *isSuperInitUse(UpcastInst *Inst) {
 static bool isSelfInitUse(SILInstruction *I) {
   // If we're reading a .sil file, treat a call to "selfinit" as a
   // self.init call as a hack to allow us to write testcases.
-  if (I->getLoc().is<SILFileLocation>()) {
+  if (I->getLoc().isSILFile()) {
     if (auto *AI = dyn_cast<ApplyInst>(I))
-      if (auto *Fn = AI->getCalleeFunction())
+      if (auto *Fn = AI->getReferencedFunction())
         if (Fn->getName().startswith("selfinit"))
           return true;
     
@@ -1092,15 +1107,30 @@ static bool isSelfInitUse(SILInstruction *I) {
  }
 
   // This is a self.init call if structured like this:
+  //
   // (call_expr type='SomeClass'
   //   (dot_syntax_call_expr type='() -> SomeClass' self
   //     (other_constructor_ref_expr implicit decl=SomeClass.init)
   //     (decl_ref_expr type='SomeClass', "self"))
   //   (...some argument...)
-  if (auto AE = dyn_cast<ApplyExpr>(LocExpr)) {
-    if ((AE = dyn_cast<ApplyExpr>(AE->getFn())) &&
-        isa<OtherConstructorDeclRefExpr>(AE->getFn()))
-      return true;
+  //
+  // Or like this:
+  //
+  // (call_expr type='SomeClass'
+  //   (dot_syntax_call_expr type='() -> SomeClass' self
+  //     (decr_ref_expr implicit decl=SomeClass.init)
+  //     (decl_ref_expr type='SomeClass', "self"))
+  //   (...some argument...)
+  //
+  if (auto *AE = dyn_cast<ApplyExpr>(LocExpr)) {
+    if ((AE = dyn_cast<ApplyExpr>(AE->getFn()))) {
+      if (isa<OtherConstructorDeclRefExpr>(AE->getFn()))
+        return true;
+      if (auto *DRE = dyn_cast<DeclRefExpr>(AE->getFn()))
+        if (auto *CD = dyn_cast<ConstructorDecl>(DRE->getDecl()))
+          if (CD->isFactoryInit())
+            return true;
+    }
   }
   return false;
 }
@@ -1113,58 +1143,18 @@ static bool isSelfInitUse(SILArgument *Arg) {
   // of a throwing delegated init.
   auto *BB = Arg->getParent();
   auto *Pred = BB->getSinglePredecessor();
-  if (!Pred || !isa<TryApplyInst>(Pred->getTerminator()))
+
+  // The two interesting cases are where self.init throws, in which case
+  // the argument came from a try_apply, or if self.init is failable,
+  // in which case we have a switch_enum.
+  if (!Pred ||
+      (!isa<TryApplyInst>(Pred->getTerminator()) &&
+       !isa<SwitchEnumInst>(Pred->getTerminator())))
     return false;
+
   return isSelfInitUse(Pred->getTerminator());
 }
 
-
-/// Determine if this value_metatype instruction is part of a call to
-/// self.init when delegating to a factory initializer.
-///
-/// FIXME: This is only necessary due to our broken model for factory
-/// initializers.
-static bool isSelfInitUse(ValueMetatypeInst *Inst) {
-  // "Inst" is a ValueMetatype instruction.  Check to see if it is
-  // used by an apply that came from a call to self.init.
-  for (auto UI : Inst->getUses()) {
-    auto *User = UI->getUser();
-
-    // Check whether we're looking up a factory initializer with
-    // class_method.
-    if (auto *CMI = dyn_cast<ClassMethodInst>(User)) {
-      // Only works for allocating initializers...
-      auto Member = CMI->getMember();
-      if (Member.kind != SILDeclRef::Kind::Allocator)
-        return false;
-
-      // ... of factory initializers.
-      auto ctor = dyn_cast_or_null<ConstructorDecl>(Member.getDecl());
-      return ctor && ctor->isFactoryInit();
-    }
-
-    if (auto apply = ApplySite::isa(User)) {
-      auto *LocExpr = apply.getLoc().getAsASTNode<ApplyExpr>();
-      if (!LocExpr)
-        return false;
-
-      LocExpr = dyn_cast<ApplyExpr>(LocExpr->getFn());
-      if (!LocExpr || !isa<OtherConstructorDeclRefExpr>(LocExpr->getFn()))
-        return false;
-
-      return true;
-    }
-
-    // Ignore the thick_to_objc_metatype instruction.
-    if (isa<ThickToObjCMetatypeInst>(User)) {
-      continue;
-    }
-
-    return false;
-  }
-
-  return false;
-}
 
 void ElementUseCollector::
 collectClassSelfUses(SILValue ClassPointer, SILType MemorySILType,
@@ -1218,18 +1208,12 @@ collectClassSelfUses(SILValue ClassPointer, SILType MemorySILType,
       recordFailableInitCall(User);
     }
 
-    // If this is a ValueMetatypeInst, check to see if it's part of a
-    // self.init call to a factory initializer in a delegating
-    // initializer.
-    if (auto *VMI = dyn_cast<ValueMetatypeInst>(User)) {
-      if (isSelfInitUse(VMI))
-        Kind = DIUseKind::SelfInit;
-      else
-        // Otherwise, this is a simple reference to "dynamicType", which is
-        // always fine, even if self is uninitialized.
-        continue;
-    }
-    
+    // If this is a ValueMetatypeInst, this is a simple reference
+    // to "type(of:)", which is always fine, even if self is
+    // uninitialized.
+    if (isa<ValueMetatypeInst>(User))
+      continue;
+
     // If this is a partial application of self, then this is an escape point
     // for it.
     if (isa<PartialApplyInst>(User))
@@ -1264,25 +1248,36 @@ void ElementUseCollector::collectDelegatingClassInitSelfUses() {
     if (isa<StoreInst>(User) && UI->getOperandNumber() == 1)
       continue;
 
-    // For class initializers, the assign into the self box is captured as
-    // a SelfInit or SuperInit elsewhere.
+    // For class initializers, the assign into the self box may be
+    // captured as SelfInit or SuperInit elsewhere.
     if (TheMemory.isClassInitSelf() &&
-        isa<AssignInst>(User) && UI->getOperandNumber() == 1)
-      continue;
+        isa<AssignInst>(User) && UI->getOperandNumber() == 1) {
+      // If the source of the assignment is an application of a C
+      // function, there is no metatype argument, so treat the
+      // assignment to the self box as the initialization.
+      if (auto apply = dyn_cast<ApplyInst>(cast<AssignInst>(User)->getSrc())) {
+        if (auto fn = apply->getCalleeFunction()) {
+          if (fn->getRepresentation()
+                == SILFunctionTypeRepresentation::CFunctionPointer) {
+            Uses.push_back(DIMemoryUse(User, DIUseKind::SelfInit, 0, 1));
+            continue;
+          }
+        }
+      }
+
+    }
 
     // Stores *to* the allocation are writes.  If the value being stored is a
     // call to self.init()... then we have a self.init call.
     if (auto *AI = dyn_cast<AssignInst>(User)) {
       if (auto *AssignSource = dyn_cast<SILInstruction>(AI->getOperand(0)))
         if (isSelfInitUse(AssignSource)) {
-          assert(isa<ArchetypeType>(TheMemory.getType()));
           Uses.push_back(DIMemoryUse(User, DIUseKind::SelfInit, 0, 1));
           continue;
         }
       if (auto *AssignSource = dyn_cast<SILArgument>(AI->getOperand(0)))
         if (AssignSource->getParent() == AI->getParent())
           if (isSelfInitUse(AssignSource)) {
-            assert(isa<ArchetypeType>(TheMemory.getType()));
             Uses.push_back(DIMemoryUse(User, DIUseKind::SelfInit, 0, 1));
             continue;
           }
@@ -1352,16 +1347,10 @@ void ElementUseCollector::collectDelegatingClassInitSelfUses() {
           recordFailableInitCall(User);
         }
 
-        // If this is a ValueMetatypeInst, check to see if it's part of a
-        // self.init call to a factory initializer in a delegating
-        // initializer.
-        if (auto *VMI = dyn_cast<ValueMetatypeInst>(User)) {
-          if (isSelfInitUse(VMI))
-            Kind = DIUseKind::SelfInit;
-          else
-            // Otherwise, this is a simple reference to "dynamicType", which is
-            // always fine, even if self is uninitialized.
-            continue;
+        // A simple reference to "type(of:)" is always fine,
+        // even if self is uninitialized.
+        if (isa<ValueMetatypeInst>(User)) {
+          continue;
         }
 
         Uses.push_back(DIMemoryUse(User, Kind, 0, 1));

@@ -20,6 +20,8 @@
 #define SWIFT_DECLCONTEXT_H
 
 #include "swift/AST/Identifier.h"
+#include "swift/AST/LookupKinds.h"
+#include "swift/AST/ResilienceExpansion.h"
 #include "swift/AST/TypeAlignments.h"
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/SourceLoc.h"
@@ -52,6 +54,7 @@ namespace swift {
   class SourceFile;
   class Type;
   class ModuleDecl;
+  class GenericTypeDecl;
   class NominalTypeDecl;
   class ProtocolConformance;
   class ValueDecl;
@@ -73,7 +76,7 @@ enum class DeclContextKind : uint8_t {
 
   Module,
   FileUnit,
-  NominalTypeDecl,
+  GenericTypeDecl,
   ExtensionDecl,
   Last_DeclContextKind = ExtensionDecl
 };
@@ -229,7 +232,7 @@ public:
   /// \returns true if this is a type context, e.g., a struct, a class, an
   /// enum, a protocol, or an extension.
   bool isTypeContext() const {
-    return getContextKind() == DeclContextKind::NominalTypeDecl ||
+    return getContextKind() == DeclContextKind::GenericTypeDecl ||
            getContextKind() == DeclContextKind::ExtensionDecl;
   }
 
@@ -238,29 +241,33 @@ public:
     return getContextKind() == DeclContextKind::ExtensionDecl;
   }
 
-  /// If this DeclContext is a nominal type declaration or an
-  /// extension thereof, return the nominal type declaration.
-  NominalTypeDecl *isNominalTypeOrNominalTypeExtensionContext() const;
+  /// If this DeclContext is a GenericType declaration or an
+  /// extension thereof, return the GenericTypeDecl.
+  GenericTypeDecl *getAsGenericTypeOrGenericTypeExtensionContext() const;
+
+  /// If this DeclContext is a NominalType declaration or an
+  /// extension thereof, return the NominalTypeDecl.
+  NominalTypeDecl *getAsNominalTypeOrNominalTypeExtensionContext() const;
 
   /// If this DeclContext is a class, or an extension on a class, return the
   /// ClassDecl, otherwise return null.
-  ClassDecl *isClassOrClassExtensionContext() const;
+  ClassDecl *getAsClassOrClassExtensionContext() const;
 
   /// If this DeclContext is an enum, or an extension on an enum, return the
   /// EnumDecl, otherwise return null.
-  EnumDecl *isEnumOrEnumExtensionContext() const;
+  EnumDecl *getAsEnumOrEnumExtensionContext() const;
 
   /// If this DeclContext is a protocol, or an extension on a
   /// protocol, return the ProtocolDecl, otherwise return null.
-  ProtocolDecl *isProtocolOrProtocolExtensionContext() const;
+  ProtocolDecl *getAsProtocolOrProtocolExtensionContext() const;
 
   /// If this DeclContext is a protocol extension, return the extended protocol.
-  ProtocolDecl *isProtocolExtensionContext() const;
+  ProtocolDecl *getAsProtocolExtensionContext() const;
 
   /// \brief Retrieve the generic parameter 'Self' from a protocol or
   /// protocol extension.
   ///
-  /// Only valid if \c isProtocolOrProtocolExtensionContext().
+  /// Only valid if \c getAsProtocolOrProtocolExtensionContext().
   GenericTypeParamDecl *getProtocolSelf() const;
 
   /// getDeclaredTypeOfContext - For a type context, retrieves the declared
@@ -360,15 +367,12 @@ public:
 
   /// Determine whether the innermost context is generic.
   bool isInnermostContextGeneric() const;
-  
-  /// Determine whether the innermost context is either a generic type context,
-  /// or a concrete type nested inside a generic type context.
-  bool isGenericTypeContext() const;
 
-  /// Determine the maximum depth of the current generic type context's generic
-  /// parameters. If the current context is not a generic type context, returns
-  /// the maximum depth of any generic parameter in this context.
-  unsigned getGenericTypeContextDepth() const;
+  /// Get the most optimal resilience expansion for code in this context.
+  /// If the body is able to be inlined into functions in other resilience
+  /// domains, this ensures that only sufficiently-conservative access patterns
+  /// are used.
+  ResilienceExpansion getResilienceExpansion() const;
 
   /// Returns true if lookups within this context could affect downstream files.
   ///
@@ -401,7 +405,7 @@ public:
   /// lookup.
   ///
   /// \returns true if anything was found.
-  bool lookupQualified(Type type, DeclName member, unsigned options,
+  bool lookupQualified(Type type, DeclName member, NLOptions options,
                        LazyResolver *typeResolver,
                        SmallVectorImpl<ValueDecl *> &decls) const;
 
@@ -463,6 +467,13 @@ public:
 
   void dumpContext() const;
   unsigned printContext(llvm::raw_ostream &OS, unsigned indent = 0) const;
+  
+  /// Get the type of `self` in this declaration context, if there is a
+  /// `self`.
+  Type getSelfTypeInContext() const;
+  /// Get the interface type of `self` in this declaration context, if there is
+  /// a `self`.
+  Type getSelfInterfaceType() const;
   
   // Only allow allocation of DeclContext using the allocator in ASTContext.
   void *operator new(size_t Bytes, ASTContext &C,
@@ -560,10 +571,6 @@ class IterableDeclContext {
   /// Lazy member loader context data.
   uint64_t LazyLoaderContextData = 0;
 
-  /// Global declarations that were synthesized on this declaration's behalf,
-  /// such as default operator definitions derived for protocol conformances.
-  ArrayRef<Decl*> DerivedGlobalDecls;
-
   template<class A, class B, class C>
   friend struct ::llvm::cast_convert_val;
 
@@ -607,18 +614,6 @@ public:
 
   /// Load all of the members of this context.
   void loadAllMembers() const;
-
-  /// Retrieve global declarations that were synthesized on this
-  /// declaration's behalf.
-  ArrayRef<Decl *> getDerivedGlobalDecls() const {
-    return DerivedGlobalDecls;
-  }
-
-  /// Set global declarations that were synthesized on this
-  /// declaration's behalf.
-  void setDerivedGlobalDecls(MutableArrayRef<Decl*> decls) {
-    DerivedGlobalDecls = decls;
-  }
 
   // Some Decls are IterableDeclContexts, but not all.
   static bool classof(const Decl *D);

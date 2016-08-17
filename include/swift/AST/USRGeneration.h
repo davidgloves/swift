@@ -18,9 +18,18 @@
 namespace swift {
 class AbstractStorageDecl;
 class ValueDecl;
+class ExtensionDecl;
 enum class AccessorKind;
 
 namespace ide {
+
+/// Prints out the USR for the Type.
+/// \returns true if it failed, false on success.
+bool printTypeUSR(Type Ty, raw_ostream &OS);
+
+/// Prints out the USR for the Type of the given decl.
+/// \returns true if it failed, false on success.
+bool printDeclTypeUSR(const ValueDecl *D, raw_ostream &OS);
 
 /// Prints out the USR for the given Decl.
 /// \returns true if it failed, false on success.
@@ -30,6 +39,10 @@ bool printDeclUSR(const ValueDecl *D, raw_ostream &OS);
 /// \returns true if it failed, false on success.
 bool printAccessorUSR(const AbstractStorageDecl *D, AccessorKind AccKind,
                       llvm::raw_ostream &OS);
+
+/// Prints out the extension USR for the given extension Decl.
+/// \returns true if it failed, false on success.
+bool printExtensionUSR(const ExtensionDecl *ED, raw_ostream &OS);
 
 } // namespace ide
 } // namespace swift

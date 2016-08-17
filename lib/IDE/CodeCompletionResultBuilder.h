@@ -14,10 +14,12 @@
 #define SWIFT_LIB_IDE_CODE_COMPLETION_RESULT_BUILDER_H
 
 #include "swift/IDE/CodeCompletion.h"
+#include "swift/AST/Types.h"
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/StringExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/StringSwitch.h"
 
 namespace clang {
 class Module;
@@ -47,6 +49,8 @@ class CodeCompletionResultBuilder {
   bool Cancelled = false;
   ArrayRef<std::pair<StringRef, StringRef>> CommentWords;
   bool IsNotRecommended = false;
+  CodeCompletionResult::NotRecommendedReason NotRecReason =
+    CodeCompletionResult::NotRecommendedReason::NoReason;
 
   void addChunkWithText(CodeCompletionString::Chunk::ChunkKind Kind,
                         StringRef Text);
@@ -94,8 +98,9 @@ public:
 
   void setLiteralKind(CodeCompletionLiteralKind kind) { LiteralKind = kind; }
   void setKeywordKind(CodeCompletionKeywordKind kind) { KeywordKind = kind; }
-  void setNotRecommended(bool NotRecommended = true) {
-    IsNotRecommended = NotRecommended;
+  void setNotRecommended(CodeCompletionResult::NotRecommendedReason Reason) {
+    IsNotRecommended = true;
+    NotRecReason = Reason;
   }
 
   void
@@ -110,6 +115,11 @@ public:
           CodeCompletionString::Chunk::ChunkKind::AccessControlKeyword,
           "private ");
       break;
+    case Accessibility::FilePrivate:
+      addChunkWithTextNoCopy(
+          CodeCompletionString::Chunk::ChunkKind::AccessControlKeyword,
+          "fileprivate ");
+      break;
     case Accessibility::Internal:
       // 'internal' is the default, don't add it.
       break;
@@ -117,6 +127,11 @@ public:
       addChunkWithTextNoCopy(
           CodeCompletionString::Chunk::ChunkKind::AccessControlKeyword,
           "public ");
+      break;
+    case Accessibility::Open:
+      addChunkWithTextNoCopy(
+          CodeCompletionString::Chunk::ChunkKind::AccessControlKeyword,
+          "open ");
       break;
     }
   }
@@ -230,21 +245,25 @@ public:
         CodeCompletionString::Chunk::ChunkKind::QuestionMark, "?");
   }
 
+  void addEqual() {
+    addChunkWithTextNoCopy(CodeCompletionString::Chunk::ChunkKind::Equal, "=");
+  }
+
   void addDeclAttrParamKeyword(StringRef Name, StringRef Annotation,
                                bool NeedSpecify) {
     addChunkWithText(CodeCompletionString::Chunk::ChunkKind::
                      DeclAttrParamKeyword, Name);
     if (NeedSpecify)
       addChunkWithText(CodeCompletionString::Chunk::ChunkKind::
-                       DeclAttrParamEqual, "=");
-    if(!Annotation.empty())
+                       DeclAttrParamColon, ": ");
+    if (!Annotation.empty())
       addTypeAnnotation(Annotation);
   }
 
   void addDeclAttrKeyword(StringRef Name, StringRef Annotation) {
     addChunkWithText(CodeCompletionString::Chunk::ChunkKind::
                      DeclAttrKeyword, Name);
-    if(!Annotation.empty())
+    if (!Annotation.empty())
       addTypeAnnotation(Annotation);
   }
 
@@ -408,9 +427,10 @@ public:
     getLastChunk().setIsAnnotation();
   }
 
-  void addBraceStmtWithCursor() {
-    addChunkWithTextNoCopy(
-        CodeCompletionString::Chunk::ChunkKind::BraceStmtWithCursor, " {}");
+  void addBraceStmtWithCursor(StringRef Description = "") {
+    addChunkWithText(
+        CodeCompletionString::Chunk::ChunkKind::BraceStmtWithCursor,
+        Description);
   }
 
   void addWhitespace(StringRef space) {

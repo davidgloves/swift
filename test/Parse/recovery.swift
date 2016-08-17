@@ -33,8 +33,8 @@ func useContainer() -> () {
   func exists() -> Bool { return true }
 }
 
-func test(a: BadAttributes) -> () {
-  a.exists() // no-warning
+func test(a: BadAttributes) -> () { // expected-note * {{did you mean 'test'?}}
+  _ = a.exists() // no-warning
 }
 
 // Here is an extra random close-brace!
@@ -67,7 +67,7 @@ static protocol StaticProtocol {} // expected-error {{declaration cannot be mark
 static typealias StaticTypealias = Int // expected-error {{declaration cannot be marked 'static'}} {{1-8=}}
 
 class ClassWithStaticDecls {
-  class var a = 42 // expected-error {{class stored properties not yet supported}}
+  class var a = 42 // expected-error {{class stored properties not supported}}
 }
 
 //===--- Recovery for missing controlling expression in statements.
@@ -88,10 +88,10 @@ func missingControllingExprInIf() {
 
   // It is debatable if we should do recovery here and parse { true } as the
   // body, but the error message should be sensible.
-  if { true } { // expected-error {{missing condition in an 'if' statement}} expected-error {{braced block of statements is an unused closure}} expected-error{{expression resolves to an unused function}} expected-error{{consecutive statements on a line must be separated by ';'}} {{14-14=;}}
+  if { true } { // expected-error {{missing condition in an 'if' statement}} expected-error {{braced block of statements is an unused closure}} expected-error{{expression resolves to an unused function}} expected-error{{consecutive statements on a line must be separated by ';'}} {{14-14=;}} expected-warning {{result of call to 'init(_builtinBooleanLiteral:)' is unused}}
   }
 
-  if { true }() { // expected-error {{missing condition in an 'if' statement}} expected-error{{consecutive statements on a line must be separated by ';'}} {{14-14=;}} expected-error{{cannot call value of non-function type '()'}}
+  if { true }() { // expected-error {{missing condition in an 'if' statement}} expected-error{{consecutive statements on a line must be separated by ';'}} {{14-14=;}} expected-error{{cannot call value of non-function type '()'}} expected-warning {{result of call to 'init(_builtinBooleanLiteral:)' is unused}}
   }
 
   // <rdar://problem/18940198>
@@ -110,10 +110,10 @@ func missingControllingExprInWhile() {
 
   // It is debatable if we should do recovery here and parse { true } as the
   // body, but the error message should be sensible.
-  while { true } { // expected-error {{missing condition in a 'while' statement}} expected-error {{braced block of statements is an unused closure}} expected-error{{expression resolves to an unused function}} expected-error{{consecutive statements on a line must be separated by ';'}} {{17-17=;}}
+  while { true } { // expected-error {{missing condition in a 'while' statement}} expected-error {{braced block of statements is an unused closure}} expected-error{{expression resolves to an unused function}} expected-error{{consecutive statements on a line must be separated by ';'}} {{17-17=;}} expected-warning {{result of call to 'init(_builtinBooleanLiteral:)' is unused}}
   }
 
-  while { true }() { // expected-error {{missing condition in a 'while' statement}} expected-error{{consecutive statements on a line must be separated by ';'}} {{17-17=;}} expected-error{{cannot call value of non-function type '()'}}
+  while { true }() { // expected-error {{missing condition in a 'while' statement}} expected-error{{consecutive statements on a line must be separated by ';'}} {{17-17=;}} expected-error{{cannot call value of non-function type '()'}} expected-warning {{result of call to 'init(_builtinBooleanLiteral:)' is unused}}
   }
 
   // <rdar://problem/18940198>
@@ -128,7 +128,7 @@ func missingControllingExprInRepeatWhile() {
   }
 
   repeat {
-  } while { true }() // expected-error{{missing condition in a 'while' statement}} expected-error{{consecutive statements on a line must be separated by ';'}} {{10-10=;}}
+  } while { true }() // expected-error{{missing condition in a 'while' statement}} expected-error{{consecutive statements on a line must be separated by ';'}} {{10-10=;}} expected-warning {{result of call is unused, but produces 'Bool'}}
 }
 
 // SR-165
@@ -137,7 +137,6 @@ func missingWhileInRepeat() {
   } // expected-error {{expected 'while' after body of 'repeat' statement}}
 }
 
-// expected-note @+1 {{in call to function 'acceptsClosure'}}
 func acceptsClosure<T>(t: T) -> Bool { return true }
 
 func missingControllingExprInFor() {
@@ -167,25 +166,7 @@ func missingControllingExprInFor() {
   for var i = 0; true { // expected-error {{expected ';' in 'for' statement}}
   }
 
-  // Ensure that we don't do recovery in the following cases.
-  for ; ; { // expected-warning {{C-style for statement is deprecated and will be removed in a future version of Swift}}
-  }
-
-  for { true }(); ; { // expected-warning {{C-style for statement is deprecated and will be removed in a future version of Swift}}
-  }
-
-  for ; { true }() ; { // expected-warning {{C-style for statement is deprecated and will be removed in a future version of Swift}}
-  }
-
-  for acceptsClosure { 42 }; ; { // expected-warning {{C-style for statement is deprecated and will be removed in a future version of Swift}}
-  }
-
-  // A trailing closure is not accepted for the condition.
-  for ; acceptsClosure { 42 }; { // expected-error{{generic parameter 'T' could not be inferred}} expected-error{{expression resolves to an unused function}}
-// expected-error@-1{{expected ';' in 'for' statement}}
-// expected-error@-2{{braced block}}
-  }
-  
+ 
 // The #if block is used to provide a scope for the for stmt to force it to end
 // where necessary to provoke the crash.
 #if true  // <rdar://problem/21679557> compiler crashes on "for{{"
@@ -204,18 +185,18 @@ for{{ // expected-error {{expression resolves to an unused function}}
 }
 
 func missingControllingExprInForEach() {
-  for in { // expected-error {{expected pattern}} expected-error {{expected SequenceType expression for for-each loop}}
+  for in { // expected-error {{expected pattern}} expected-error {{expected Sequence expression for for-each loop}}
   }
 
 
   // expected-error @+4 {{expected 'in' after for-each pattern}}
   // expected-error @+3 {{expected '{' to start the body of for-each loop}}
   // expected-error @+2 {{expected pattern}}
-  // expected-error @+1 {{expected SequenceType expression for for-each loop}}
-  for for in { // expected-error {{expected pattern}} expected-error {{expected SequenceType expression for for-each loop}}
+  // expected-error @+1 {{expected Sequence expression for for-each loop}}
+  for for in { // expected-error {{expected pattern}} expected-error {{expected Sequence expression for for-each loop}}
   }
 
-  for i in { // expected-error {{expected SequenceType expression for for-each loop}}
+  for i in { // expected-error {{expected Sequence expression for for-each loop}}
   }
 }
 
@@ -305,7 +286,7 @@ struct ErrorTypeInVarDecl8 {
 }
 
 struct ErrorTypeInVarDecl9 {
-  var v1 : protocol // expected-error {{expected '<' in protocol composition type}}
+  var v1 : protocol // expected-error {{expected identifier for type name}}
   var v2 : Int
 }
 
@@ -320,13 +301,30 @@ struct ErrorTypeInVarDecl11 {
 }
 
 func ErrorTypeInPattern1(_: protocol<) { } // expected-error {{expected identifier for type name}}
-
 func ErrorTypeInPattern2(_: protocol<F) { } // expected-error {{expected '>' to complete protocol composition type}}
-// expected-note@-1 {{to match this opening '<'}}
-// expected-error@-2 {{use of undeclared type 'F'}}
+                                            // expected-note@-1 {{to match this opening '<'}}
+                                            // expected-error@-2 {{use of undeclared type 'F'}}
 
 func ErrorTypeInPattern3(_: protocol<F,) { } // expected-error {{expected identifier for type name}}
-// expected-error@-1 {{use of undeclared type 'F'}}
+                                             // expected-error@-1 {{use of undeclared type 'F'}}
+
+struct ErrorTypeInVarDecl12 {
+  var v1 : FooProtocol & // expected-error{{expected identifier for type name}}
+  var v2 : Int
+}
+
+struct ErrorTypeInVarDecl13 { // expected-note {{in declaration of 'ErrorTypeInVarDecl13'}}
+  var v1 : & FooProtocol // expected-error {{expected type}} expected-error {{consecutive declarations on a line must be separated by ';'}} expected-error{{expected declaration}} 
+  var v2 : Int
+}
+
+struct ErrorTypeInVarDecl16 {
+  var v1 : FooProtocol & // expected-error {{expected identifier for type name}}
+  var v2 : Int
+}
+
+func ErrorTypeInPattern4(_: FooProtocol & ) { } // expected-error {{expected identifier for type name}}
+
 
 struct ErrorGenericParameterList1< // expected-error {{expected an identifier to name generic parameter}} expected-error {{expected '{' in struct}}
 
@@ -354,7 +352,7 @@ struct ErrorTypeInVarDeclFunctionType1 {
   var v2 : Int
 }
 
-struct ErrorTypeInVarDeclArrayType1 {
+struct ErrorTypeInVarDeclArrayType1 { // expected-note{{in declaration of 'ErrorTypeInVarDeclArrayType1'}}
   var v1 : Int[+] // expected-error {{expected declaration}} expected-error {{consecutive declarations on a line must be separated by ';'}}
   // expected-error @-1 {{expected expression after unary operator}}
   // expected-error @-2 {{expected expression}}
@@ -409,7 +407,7 @@ struct ErrorInFunctionSignatureResultArrayType5 {
 }
 
 
-struct ErrorInFunctionSignatureResultArrayType11 {
+struct ErrorInFunctionSignatureResultArrayType11 { // expected-note{{in declaration of 'ErrorInFunctionSignatureResultArrayType11'}}
   func foo() -> Int[(a){a++}] { // expected-error {{consecutive declarations on a line must be separated by ';'}} {{29-29=;}} expected-error {{expected ']' in array type}} expected-note {{to match this opening '['}} expected-error {{use of unresolved identifier 'a'}} expected-error {{expected declaration}}
   }
 }
@@ -442,13 +440,13 @@ class ExprSuper1 {
 
 class ExprSuper2 {
   init() {
-    super. // expected-error {{expected member name following '.'}} expected-error {{expected '.' or '[' after 'super'}}
+    super. // expected-error {{expected member name following '.'}} 
   }
 }
 
 //===--- Recovery for braces inside a nominal decl.
 
-struct BracesInsideNominalDecl1 {
+struct BracesInsideNominalDecl1 { // expected-note{{in declaration of 'BracesInsideNominalDecl1'}}
   { // expected-error {{expected declaration}}
     aaa
   }
@@ -459,9 +457,18 @@ func use_BracesInsideNominalDecl1() {
   var _ : BracesInsideNominalDecl1.A // no-error
 }
 
+class SR771 { // expected-note {{in declaration of 'SR771'}}
+    print("No one else was in the room where it happened") // expected-error {{expected declaration}}
+}
+
+extension SR771 { // expected-note {{in extension of 'SR771'}}
+    print("The room where it happened, the room where it happened") // expected-error {{expected declaration}}
+}
+
+
 //===--- Recovery for wrong decl introducer keyword.
 
-class WrongDeclIntroducerKeyword1 {
+class WrongDeclIntroducerKeyword1 { // expected-note{{in declaration of 'WrongDeclIntroducerKeyword1'}}
   notAKeyword() {} // expected-error {{expected declaration}}
   func foo() {}
   class func bar() {}
@@ -497,18 +504,9 @@ public enum TestB {
 class bar {}
 var baz: bar
 // expected-error@+1{{unnamed parameters must be written with the empty name '_'}}
-func foo1(bar!=baz) {}
+func foo1(bar!=baz) {} // expected-note {{did you mean 'foo1'?}}
 // expected-error@+1{{unnamed parameters must be written with the empty name '_'}}
-func foo2(bar! = baz) {}
-
-
-
-// <rdar://problem/18662272> Infinite loop and unbounded memory consumption in parser
-class Baz {}
-class Bar<T> {}
-func f1(a: Bar<Baz!>) {}
-func f2(a: Bar<Baz /* some comment */!>) {}
-
+func foo2(bar! = baz) {}// expected-note {{did you mean 'foo2'?}}
 
 // rdar://19605567
 // expected-error@+1{{use of unresolved identifier 'esp'}}
@@ -542,12 +540,13 @@ func a(s: S[{{g) -> Int {}  // expected-note {{to match this opening '('}}
 // expected-error@+3{{expected '(' for initializer parameters}}
 // expected-error@+2{{initializers may only be declared within a type}}
 // expected-error@+1{{expected an identifier to name generic parameter}}
-func F() { init<( } )}
+func F() { init<( } )} // expected-note {{did you mean 'F'?}}
 
 // rdar://20337695
 func f1() {
 
-  // expected-error @+5 {{use of unresolved identifier 'C'}}
+  // expected-error @+6 {{use of unresolved identifier 'C'}}
+  // expected-note @+5 {{did you mean 'n'?}}
   // expected-error @+4 {{unary operator cannot be separated from its operand}} {{11-12=}}
   // expected-error @+3 {{'==' is not a prefix unary operator}}
   // expected-error @+2 {{consecutive statements on a line must be separated by ';'}} {{8-8=;}}
@@ -559,19 +558,24 @@ func f1() {
 
 // <rdar://problem/20489838> QoI: Nonsensical error and fixit if "let" is missing between 'if let ... where' clauses
 func testMultiPatternConditionRecovery(x: Int?) {
-  // expected-error@+1 {{binding ended by previous 'where' clause; use 'let' to introduce a new one}} {{30-30=let }}
-  if let y = x where y == 0, z = x {
+  // expected-error@+1 {{expected ',' joining parts of a multi-clause condition}} {{16-21=,}}
+  if let y = x where y == 0, let z = x {
     _ = y
     _ = z
   }
 
-  // expected-error@+1 {{binding ended by previous 'where' clause; use 'var' to introduce a new one}} {{30-30=var }}
-  if var y = x where y == 0, z = x {
+  if var y = x, y == 0, var z = x {
     z = y; y = z
   }
 
+  if var y = x, z = x { // expected-error {{expected 'var' in conditional}} {{17-17=var }}
+    z = y; y = z
+  }
+
+
   // <rdar://problem/20883210> QoI: Following a "let" condition with boolean condition spouts nonsensical errors
-  guard let x: Int? = 1, x == 1 else {  } // expected-error {{boolean condition requires 'where' to separate it from variable binding}} {{24-25= where}}
+  guard let x: Int? = 1, x == 1 else {  }
+  // expected-warning @-1 {{explicitly specified type 'Int?' adds an additional level of optional to the initializer, making the optional check always succeed}} {{16-22=Int}}
 }
 
 // rdar://20866942
@@ -635,13 +639,14 @@ protocol B23086402 {
 
 // <rdar://problem/23550816> QoI: Poor diagnostic in argument list of "print" (varargs related)
 func test23086402(a: A23086402) {
-  print(a.b.c + "")  // expected-error {{cannot convert value of type '[String]' to expected argument type 'String'}}
+  print(a.b.c + "")  // expected-error {{binary operator '+' cannot be applied to operands of type '[String]' and 'String'}} expected-note {{expected an argument list of type '(String, String)'}}
 }
 
 // <rdar://problem/23719432> [practicalswift] Compiler crashes on &(Int:_)
 func test23719432() {
   var x = 42
   &(Int:x)  // expected-error {{'&' can only appear immediately in a call argument list}}
+  // expected-warning @-1 {{expression of type 'inout (Int: Int)' is unused}}
 }
 
 // <rdar://problem/19911096> QoI: terrible recovery when using '·' for an operator
@@ -652,6 +657,7 @@ infix operator · {  // expected-error {{'·' is considered to be an identifier,
 // <rdar://problem/21712891> Swift Compiler bug: String subscripts with range should require closing bracket.
 func r21712891(s : String) -> String {
   let a = s.startIndex..<s.startIndex
+  _ = a
   // The specific errors produced don't actually matter, but we need to reject this.
   return "\(s[a)"  // expected-error 3 {{}}
 }
@@ -663,4 +669,9 @@ func postfixDot(a : String) {
   _ = a.   utf8  // expected-error {{extraneous whitespace after '.' is not permitted}} {{9-12=}}
   _ = a.       // expected-error {{expected member name following '.'}}
     a.         // expected-error {{expected member name following '.'}}
+}
+
+// <rdar://problem/22290244> QoI: "UIColor." gives two issues, should only give one
+func f() {
+  _ = ClassWithStaticDecls.  // expected-error {{expected member name following '.'}}
 }

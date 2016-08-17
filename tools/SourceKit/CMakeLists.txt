@@ -1,6 +1,10 @@
 include(CheckSymbolExists)
 
-set(SOURCEKIT_VERSION_STRING "${SWIFT_COMPILER_VERSION}")
+if (DARWIN_TOOLCHAIN_VERSION)
+  set(SOURCEKIT_VERSION_STRING "${DARWIN_TOOLCHAIN_VERSION}")
+else()
+  set(SOURCEKIT_VERSION_STRING "${SWIFT_COMPILER_VERSION}")
+endif()
 
 set(SOURCEKIT_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(SOURCEKIT_BINARY_DIR ${SWIFT_BINARY_DIR})
@@ -66,19 +70,26 @@ function(add_sourcekit_default_compiler_flags target)
   set(enable_assertions "${LLVM_ENABLE_ASSERTIONS}")
   set(analyze_code_coverage "${SWIFT_ANALYZE_CODE_COVERAGE}")
   _add_variant_c_compile_flags(
-      "${sdk}"
-      "${arch}"
-      "${build_type}"
-      "${enable_assertions}"
-      "${analyze_code_coverage}"
-      c_compile_flags)
+    SDK "${sdk}"
+    ARCH "${arch}"
+    BUILD_TYPE "${build_type}"
+    ENABLE_ASSERTIONS "${enable_assertions}"
+    ANALYZE_CODE_COVERAGE "${analyze_code_coverage}"
+    ENABLE_LTO "${SWIFT_TOOLS_ENABLE_LTO}"
+    RESULT_VAR_NAME c_compile_flags)
   _add_variant_link_flags(
-      "${sdk}"
-      "${arch}"
-      "${build_type}"
-      "${enable_assertions}"
-      "${analyze_code_coverage}"
-      link_flags)
+    SDK "${sdk}"
+    ARCH "${arch}"
+    BUILD_TYPE "${build_type}"
+    ENABLE_ASSERTIONS "${enable_assertions}"
+    ENABLE_LTO "${SWIFT_TOOLS_ENABLE_LTO}"
+    ANALYZE_CODE_COVERAGE "${analyze_code_coverage}"
+    RESULT_VAR_NAME link_flags)
+
+  if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
+    list(APPEND c_compile_flags "-fblocks")
+    list(APPEND link_flags "-lBlocksRuntime")
+  endif()
 
   # Convert variables to space-separated strings.
   _list_escape_for_shell("${c_compile_flags}" c_compile_flags)
@@ -96,7 +107,7 @@ endfunction()
 # Usage:
 #   add_sourcekit_library(name       # Name of the library
 #     [DEPENDS dep1 ...]             # Libraries this library depends on
-#     [COMPONENT_DEPENDS comp1 ...]  # LLVM components this library depends on
+#     [LLVM_COMPONENT_DEPENDS comp1 ...]  # LLVM components this library depends on
 #     [INSTALL_IN_COMPONENT comp]    # The Swift installation component that this library belongs to.
 #     [SHARED]
 #     source1 [source2 source3 ...]) # Sources to add into this library
@@ -104,7 +115,7 @@ macro(add_sourcekit_library name)
   cmake_parse_arguments(SOURCEKITLIB
       "SHARED"
       "INSTALL_IN_COMPONENT"
-      "DEPENDS;COMPONENT_DEPENDS"
+      "DEPENDS;LLVM_COMPONENT_DEPENDS"
       ${ARGN})
   set(srcs ${SOURCEKITLIB_UNPARSED_ARGUMENTS})
 
@@ -116,17 +127,17 @@ macro(add_sourcekit_library name)
       ${CMAKE_CURRENT_SOURCE_DIR}
     )
     if(NOT lib_path MATCHES "^[.][.]")
-      file( GLOB_RECURSE headers
+      file(GLOB_RECURSE headers
         ${SOURCEKIT_SOURCE_DIR}/include/SourceKit/${lib_path}/*.h
         ${SOURCEKIT_SOURCE_DIR}/include/SourceKit/${lib_path}/*.def
       )
       set_source_files_properties(${headers} PROPERTIES HEADER_FILE_ONLY ON)
 
-      file( GLOB_RECURSE tds
+      file(GLOB_RECURSE tds
         ${SOURCEKIT_SOURCE_DIR}/include/SourceKit/${lib_path}/*.td
       )
       source_group("TableGen descriptions" FILES ${tds})
-      set_source_files_properties(${tds}} PROPERTIES HEADER_FILE_ONLY ON)
+      set_source_files_properties(${tds} PROPERTIES HEADER_FILE_ONLY ON)
 
       set(srcs ${srcs} ${headers} ${tds})
     endif()
@@ -138,16 +149,16 @@ macro(add_sourcekit_library name)
   else()
     set(libkind)
   endif()
-  add_library( ${name} ${libkind} ${srcs} )
+  add_library(${name} ${libkind} ${srcs})
   llvm_update_compile_flags(${name})
 
   set_output_directory(${name}
       BINARY_DIR ${SOURCEKIT_RUNTIME_OUTPUT_INTDIR}
       LIBRARY_DIR ${SOURCEKIT_LIBRARY_OUTPUT_INTDIR})
 
-  if( LLVM_COMMON_DEPENDS )
-    add_dependencies( ${name} ${LLVM_COMMON_DEPENDS} )
-  endif( LLVM_COMMON_DEPENDS )
+  if(LLVM_COMMON_DEPENDS)
+    add_dependencies(${name} ${LLVM_COMMON_DEPENDS})
+  endif(LLVM_COMMON_DEPENDS)
 
   set(prefixed_link_libraries)
   foreach(dep ${SOURCEKITLIB_DEPENDS})
@@ -167,7 +178,7 @@ macro(add_sourcekit_library name)
     target_link_libraries("${name}" INTERFACE ${SOURCEKITLIB_DEPENDS})
   endif()
 
-  swift_common_llvm_config( ${name} ${SOURCEKITLIB_COMPONENT_DEPENDS} )
+  swift_common_llvm_config(${name} ${SOURCEKITLIB_LLVM_COMPONENT_DEPENDS})
 
   if(SOURCEKITLIB_SHARED AND EXPORTED_SYMBOL_FILE)
     add_sourcekit_symbol_exports(${name} ${EXPORTED_SYMBOL_FILE})
@@ -201,7 +212,7 @@ endmacro()
 # Usage:
 #   add_sourcekit_executable(name     # Name of the executable
 #     [DEPENDS dep1 ...]              # Libraries this executable depends on
-#     [COMPONENT_DEPENDS comp1 ...]   # LLVM components this executable 
+#     [LLVM_COMPONENT_DEPENDS comp1 ...]   # LLVM components this executable 
 #                                     # depends on
 #     [EXCLUDE_FROM_ALL]              # Whether to exclude this executable from
 #                                     # the ALL_BUILD target
@@ -210,7 +221,7 @@ macro(add_sourcekit_executable name)
   cmake_parse_arguments(SOURCEKITEXE
     "EXCLUDE_FROM_ALL"
     ""
-    "DEPENDS;COMPONENT_DEPENDS"
+    "DEPENDS;LLVM_COMPONENT_DEPENDS"
     ${ARGN})
 
   if (${SOURCEKITEXE_EXCLUDE_FROM_ALL})
@@ -225,11 +236,11 @@ macro(add_sourcekit_executable name)
 
   # Add appropriate dependencies
   if(LLVM_COMMON_DEPENDS)
-    add_dependencies( ${name} ${LLVM_COMMON_DEPENDS} )
+    add_dependencies(${name} ${LLVM_COMMON_DEPENDS})
   endif()
 
   target_link_libraries(${name} ${SOURCEKITEXE_DEPENDS})
-  swift_common_llvm_config(${name} ${SOURCEKITEXE_COMPONENT_DEPENDS})
+  swift_common_llvm_config(${name} ${SOURCEKITEXE_LLVM_COMPONENT_DEPENDS})
   target_link_libraries(${name} ${LLVM_COMMON_LIBS})
 
   set_target_properties(${name} PROPERTIES FOLDER "SourceKit executables")
@@ -238,11 +249,10 @@ macro(add_sourcekit_executable name)
       set_target_properties(${name}
         PROPERTIES
         LINK_FLAGS "-Wl,-exported_symbol,_main")
-
-      if(SWIFT_ANALYZE_CODE_COVERAGE)
-        set_property(TARGET "${name}" APPEND_STRING PROPERTY
-            LINK_FLAGS " -fprofile-instr-generate=swift-%p.profraw -fcoverage-mapping")
-      endif()
+    endif()
+    if(SWIFT_ANALYZE_CODE_COVERAGE)
+      set_property(TARGET "${name}" APPEND_STRING PROPERTY
+        LINK_FLAGS " -fprofile-instr-generate -fcoverage-mapping")
     endif()
   endif()
   add_sourcekit_default_compiler_flags("${name}")
@@ -253,13 +263,13 @@ endmacro()
 # Usage:
 #   add_sourcekit_framework(name     # Name of the framework
 #     [DEPENDS dep1 ...]             # Libraries this framework depends on
-#     [COMPONENT_DEPENDS comp1 ...]  # LLVM components this framework depends on
+#     [LLVM_COMPONENT_DEPENDS comp1 ...]  # LLVM components this framework depends on
 #     [MODULEMAP modulemap]          # Module map file for this framework
 #     [INSTALL_IN_COMPONENT comp]    # The Swift installation component that this framework belongs to.
 #     source1 [source2 source3 ...]) # Sources to add into this framework
 macro(add_sourcekit_framework name)
   cmake_parse_arguments(SOURCEKITFW
-    "" "MODULEMAP;INSTALL_IN_COMPONENT" "DEPENDS;COMPONENT_DEPENDS" ${ARGN})
+    "" "MODULEMAP;INSTALL_IN_COMPONENT" "DEPENDS;LLVM_COMPONENT_DEPENDS" ${ARGN})
   set(srcs ${SOURCEKITFW_UNPARSED_ARGUMENTS})
 
   set(lib_dir ${SOURCEKIT_LIBRARY_OUTPUT_INTDIR})
@@ -282,7 +292,7 @@ macro(add_sourcekit_framework name)
   endif()
 
   llvm_process_sources(srcs ${srcs})
-  add_library( ${name} SHARED ${srcs} )
+  add_library(${name} SHARED ${srcs})
   llvm_update_compile_flags(${name})
 
   set(headers)
@@ -297,15 +307,15 @@ macro(add_sourcekit_framework name)
     set_source_files_properties(${headers} PROPERTIES HEADER_FILE_ONLY ON)
   endif(MSVC_IDE OR XCODE)
 
-  if( LLVM_COMMON_DEPENDS )
-    add_dependencies( ${name} ${LLVM_COMMON_DEPENDS} )
-  endif( LLVM_COMMON_DEPENDS )
+  if(LLVM_COMMON_DEPENDS)
+    add_dependencies(${name} ${LLVM_COMMON_DEPENDS})
+  endif(LLVM_COMMON_DEPENDS)
 
-  target_link_libraries( ${name} PRIVATE ${SOURCEKITFW_DEPENDS} )
-  swift_common_llvm_config( ${name} ${SOURCEKITFW_COMPONENT_DEPENDS} )
+  target_link_libraries(${name} PRIVATE ${SOURCEKITFW_DEPENDS})
+  swift_common_llvm_config(${name} ${SOURCEKITFW_LLVM_COMPONENT_DEPENDS})
 
   if (EXPORTED_SYMBOL_FILE)
-    add_sourcekit_symbol_exports( ${name} ${EXPORTED_SYMBOL_FILE} ) 
+    add_sourcekit_symbol_exports(${name} ${EXPORTED_SYMBOL_FILE})
   endif()
 
   if(SOURCEKITFW_MODULEMAP)
@@ -369,10 +379,10 @@ endmacro(add_sourcekit_framework)
 # Usage:
 #   add_sourcekit_xpc_service(name    # Name of the XPC service
 #     [DEPENDS dep1 ...]              # Libraries this service depends on
-#     [COMPONENT_DEPENDS comp1 ...]   # LLVM components this service depends on
+#     [LLVM_COMPONENT_DEPENDS comp1 ...]   # LLVM components this service depends on
 #     source1 [source2 source3 ...])  # Sources to add into this service
 macro(add_sourcekit_xpc_service name framework_target)
-  cmake_parse_arguments(SOURCEKITXPC "" "" "DEPENDS;COMPONENT_DEPENDS" ${ARGN})
+  cmake_parse_arguments(SOURCEKITXPC "" "" "DEPENDS;LLVM_COMPONENT_DEPENDS" ${ARGN})
   set(srcs ${SOURCEKITXPC_UNPARSED_ARGUMENTS})
 
   set(lib_dir ${SOURCEKIT_LIBRARY_OUTPUT_INTDIR})
@@ -388,7 +398,7 @@ macro(add_sourcekit_xpc_service name framework_target)
   endif()
 
   set(XPCSERVICE_NAME ${name})  
-  set(XPCSERVICE_IDENTIFIER "${name}.${SOURCEKIT_VERSION_STRING}")
+  set(XPCSERVICE_IDENTIFIER "com.apple.${name}.${SOURCEKIT_VERSION_STRING}")
   set(XPCSERVICE_BUNDLE_VERSION "${SOURCEKIT_VERSION_STRING}")
   set(XPCSERVICE_SHORT_VERSION_STRING "1.0")
   configure_file(
@@ -400,7 +410,7 @@ macro(add_sourcekit_xpc_service name framework_target)
       "${CMAKE_CURRENT_BINARY_DIR}/${name}.Info.plist" "${xpc_contents_dir}/Info.plist")
   list(APPEND srcs "${xpc_contents_dir}/Info.plist")
 
-  add_llvm_executable( ${name} ${srcs} )
+  add_llvm_executable(${name} ${srcs})
   set_target_properties(${name} PROPERTIES FOLDER "XPC Services")
   set_target_properties(${name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${xpc_bin_dir}")
 
@@ -409,15 +419,15 @@ macro(add_sourcekit_xpc_service name framework_target)
     LIBRARY_DIR "${xpc_bin_dir}")
 
   # Add appropriate dependencies
-  if( LLVM_COMMON_DEPENDS )
-    add_dependencies( ${name} ${LLVM_COMMON_DEPENDS} )
-  endif( LLVM_COMMON_DEPENDS )
+  if(LLVM_COMMON_DEPENDS)
+    add_dependencies(${name} ${LLVM_COMMON_DEPENDS})
+  endif(LLVM_COMMON_DEPENDS)
 
-  target_link_libraries( ${name} ${SOURCEKITXPC_DEPENDS} )
-  swift_common_llvm_config( ${name} ${SOURCEKITXPC_COMPONENT_DEPENDS} )
-  target_link_libraries( ${name} ${LLVM_COMMON_LIBS} )
+  target_link_libraries(${name} ${SOURCEKITXPC_DEPENDS})
+  swift_common_llvm_config(${name} ${SOURCEKITXPC_LLVM_COMPONENT_DEPENDS})
+  target_link_libraries(${name} ${LLVM_COMMON_LIBS})
   
-  add_dependencies( ${framework_target} ${name} )
+  add_dependencies(${framework_target} ${name})
 
   if (SOURCEKIT_DEPLOYMENT_OS MATCHES "^macosx")
     add_custom_command(TARGET ${name} POST_BUILD
@@ -495,6 +505,20 @@ include_directories(BEFORE
   ${SOURCEKIT_BINARY_DIR}/include
   ${SOURCEKIT_SOURCE_DIR}/include
 )
+
+if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
+  include_directories(AFTER ${SWIFT_PATH_TO_LIBDISPATCH_SOURCE})
+
+  add_library(dispatch SHARED IMPORTED)
+  set_target_properties(dispatch PROPERTIES
+                        IMPORTED_LOCATION ${SWIFT_PATH_TO_LIBDISPATCH_BUILD}/src/.libs/libdispatch.so)
+
+  add_library(swiftCore SHARED IMPORTED)
+  set_target_properties(swiftCore PROPERTIES
+                        IMPORTED_LOCATION ${SOURCEKIT_BINARY_DIR}/lib/swift/linux/libswiftCore.so)
+
+  set(SOURCEKIT_NEED_EXPLICIT_LIBDISPATCH TRUE)
+endif()
 
 add_subdirectory(lib)
 add_subdirectory(tools)

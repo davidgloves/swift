@@ -139,15 +139,6 @@ Type TypeConverter::getLoweredCBridgedType(AbstractionPattern pattern,
                                            bool bridgedCollectionsAreOptional) {
   auto clangTy = pattern.isClangType() ? pattern.getClangType() : nullptr;
 
-  // Bridge String back to NSString.
-  auto nativeStringTy = getStringType();
-  if (nativeStringTy && t->isEqual(nativeStringTy)) {
-    Type bridgedTy = getNSStringType();
-    if (bridgedCollectionsAreOptional && clangTy)
-      bridgedTy = OptionalType::get(bridgedTy);
-    return bridgedTy;
-  }
-
   // Bridge Bool back to ObjC bool, unless the original Clang type was _Bool
   // or the Darwin Boolean type.
   auto nativeBoolTy = getBoolType();
@@ -177,6 +168,11 @@ Type TypeConverter::getLoweredCBridgedType(AbstractionPattern pattern,
       return ExistentialMetatypeType::get(metaTy->getInstanceType(),
                                           MetatypeRepresentation::ObjC);
     }
+  }
+  
+  // `Any` can bridge to `AnyObject` (`id` in ObjC).
+  if (Context.LangOpts.EnableIdAsAny && t->isAny()) {
+    return Context.getProtocol(KnownProtocolKind::AnyObject)->getDeclaredType();
   }
   
   if (auto funTy = t->getAs<FunctionType>()) {
@@ -211,34 +207,33 @@ Type TypeConverter::getLoweredCBridgedType(AbstractionPattern pattern,
     }
   }
 
-  // Array bridging.
-  if (auto arrayDecl = Context.getArrayDecl()) {
-    if (t->getAnyNominal() == arrayDecl) {
-      Type bridgedTy = getNSArrayType();
-      if (bridgedCollectionsAreOptional && clangTy)
-        bridgedTy = OptionalType::get(bridgedTy);
-      return bridgedTy;
-    }
+  auto foreignRepresentation =
+    t->getForeignRepresentableIn(ForeignLanguage::ObjectiveC, M.TheSwiftModule);
+  switch (foreignRepresentation.first) {
+  case ForeignRepresentableKind::None:
+  case ForeignRepresentableKind::Trivial:
+  case ForeignRepresentableKind::Object:
+    return t;
+
+  case ForeignRepresentableKind::Bridged:
+  case ForeignRepresentableKind::StaticBridged: {
+    auto conformance = foreignRepresentation.second;
+    assert(conformance && "Missing conformance?");
+    Type bridgedTy =
+      ProtocolConformance::getTypeWitnessByName(
+        t, conformance, M.getASTContext().Id_ObjectiveCType,
+        nullptr);
+    assert(bridgedTy && "Missing _ObjectiveCType witness?");
+    if (bridgedCollectionsAreOptional && clangTy)
+      bridgedTy = OptionalType::get(bridgedTy);
+    return bridgedTy;
   }
 
-  // Dictionary bridging.
-  if (auto dictDecl = Context.getDictionaryDecl()) {
-    if (t->getAnyNominal() == dictDecl) {
-      Type bridgedTy = getNSDictionaryType();
-      if (bridgedCollectionsAreOptional && clangTy)
-        bridgedTy = OptionalType::get(bridgedTy);
-      return bridgedTy;
-    }
+  case ForeignRepresentableKind::BridgedError: {
+    auto nsErrorDecl = M.getASTContext().getNSErrorDecl();
+    assert(nsErrorDecl && "Cannot bridge when NSError isn't available");
+    return nsErrorDecl->getDeclaredInterfaceType();
   }
-
-  // Set bridging.
-  if (auto setDecl = Context.getSetDecl()) {
-    if (t->getAnyNominal() == setDecl) {
-      Type bridgedTy = getNSSetType();
-      if (bridgedCollectionsAreOptional && clangTy)
-        bridgedTy = OptionalType::get(bridgedTy);
-      return bridgedTy;
-    }
   }
 
   return t;

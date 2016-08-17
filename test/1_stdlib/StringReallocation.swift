@@ -1,9 +1,9 @@
-// RUN: %target-run-simple-swift | FileCheck %s
+// RUN: %target-run-simple-swift | %FileCheck %s
 // REQUIRES: executable_test
 
 // CHECK-NOT: Reallocations exceeded 30
 func testReallocation() {
-  var x = "The quick brown fox jumped over the lazy dog\n"._split(" ")
+  var x = "The quick brown fox jumped over the lazy dog\n"._split(separator: " ")
 
   var story = "Let me tell you a story:"
   var laps = 1000
@@ -19,7 +19,7 @@ func testReallocation() {
         
         // To avoid dumping a vast string here, just write the first
         // part of the story out each time there's a reallocation.
-        var intro = story._split(":")[0]
+        var intro = story._split(separator: ":")[0]
         print("reallocation \(reallocations), with intro \(intro)")
         
         if reallocations >= 30 {

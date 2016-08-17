@@ -1,5 +1,5 @@
-// RUN: %target-swift-frontend  -O -emit-sil  %s | FileCheck %s
-// RUN: %target-swift-frontend  -O -wmo -emit-sil  %s | FileCheck -check-prefix=CHECK-WMO %s
+// RUN: %target-swift-frontend  -O -emit-sil  %s | %FileCheck %s
+// RUN: %target-swift-frontend  -O -wmo -emit-sil  %s | %FileCheck -check-prefix=CHECK-WMO %s
 
 // Check that values of internal and private global variables, which are provably assigned only 
 // once, are propagated into their uses and enable further optimizations like constant
@@ -23,7 +23,8 @@ internal var IVITakenAddress = 1
 
 // Taking the address of a global should prevent from performing the propagation of its value.
 @inline(never)
-public func takeInout<T>(inout x:T) {
+@_semantics("optimize.sil.never")
+public func takeInout<T>(_ x: inout T) {
 }
 
 // Compiler should detect that we assign a global here as well and prevent a global optimization.

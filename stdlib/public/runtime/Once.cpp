@@ -14,6 +14,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Private.h"
 #include "swift/Runtime/Once.h"
 #include "swift/Runtime/Debug.h"
 #include <type_traits>
@@ -40,12 +41,16 @@ static_assert(sizeof(swift_once_t) <= sizeof(void*),
 void swift::swift_once(swift_once_t *predicate, void (*fn)(void *)) {
 #if defined(__APPLE__)
   dispatch_once_f(predicate, nullptr, fn);
+#elif defined(__CYGWIN__)
+  _swift_once_f(predicate, nullptr, fn);
 #else
   // FIXME: We're relying here on the coincidence that libstdc++ uses pthread's
   // pthread_once, and that on glibc pthread_once follows a compatible init
   // process (the token is a word that is atomically incremented from 0 to
   // 1 to 2 during initialization) to work. We should implement our own version
   // that we can rely on to continue to work that way.
+  // The MSVC port also relies on this, because the std::call_once on MSVC
+  // follows the compatible init process.
   // For more information, see rdar://problem/18499385
   std::call_once(*predicate, [fn]() { fn(nullptr); });
 #endif

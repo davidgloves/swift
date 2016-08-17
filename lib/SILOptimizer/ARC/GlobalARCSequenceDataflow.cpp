@@ -50,10 +50,7 @@ using ARCBBStateInfoHandle = ARCSequenceDataflowEvaluator::ARCBBStateInfoHandle;
 ///
 /// NestingDetected will be set to indicate that the block needs to be
 /// reanalyzed if code motion occurs.
-static bool processBBTopDown(
-    ARCBBState &BBState,
-    BlotMapVector<SILInstruction *, TopDownRefCountState> &DecToIncStateMap,
-    AliasAnalysis *AA, RCIdentityFunctionInfo *RCIA) {
+bool ARCSequenceDataflowEvaluator::processBBTopDown(ARCBBState &BBState) {
   DEBUG(llvm::dbgs() << ">>>> Top Down!\n");
 
   SILBasicBlock &BB = BBState.getBB();
@@ -61,7 +58,7 @@ static bool processBBTopDown(
   bool NestingDetected = false;
 
   TopDownDataflowRCStateVisitor<ARCBBState> DataflowVisitor(
-      RCIA, BBState, DecToIncStateMap);
+      RCIA, BBState, DecToIncStateMap, SetFactory);
 
   // If the current BB is the entry BB, initialize a state corresponding to each
   // of its owned parameters. This enables us to know that if we see a retain
@@ -110,7 +107,7 @@ static bool processBBTopDown(
       if (Op && OtherState->first == Op)
         continue;
 
-      OtherState->second.updateForSameLoopInst(&I, &I, AA);
+      OtherState->second.updateForSameLoopInst(&I, SetFactory, AA);
     }
   }
 
@@ -187,8 +184,7 @@ bool ARCSequenceDataflowEvaluator::processTopDown() {
     mergePredecessors(BBDataHandle);
 
     // Then perform the basic block optimization.
-    NestingDetected |=
-        processBBTopDown(BBDataHandle.getState(), DecToIncStateMap, AA, RCIA);
+    NestingDetected |= processBBTopDown(BBDataHandle.getState());
   }
 
   return NestingDetected;
@@ -250,7 +246,7 @@ bool ARCSequenceDataflowEvaluator::processBBBottomUp(
 
   BottomUpDataflowRCStateVisitor<ARCBBState> DataflowVisitor(
       RCIA, BBState, FreezeOwnedArgEpilogueReleases, ConsumedArgToReleaseMap,
-      IncToDecStateMap);
+      IncToDecStateMap, SetFactory);
 
   // For each terminator instruction I in BB visited in reverse...
   for (auto II = std::next(BB.rbegin()), IE = BB.rend(); II != IE;) {
@@ -274,10 +270,6 @@ bool ARCSequenceDataflowEvaluator::processBBBottomUp(
     // that the instruction "visits".
     SILValue Op = Result.RCIdentity;
 
-    // If I is a use of the value that we are going to track, this is the
-    // position right after I where we would want to move the release.
-    auto *InsertPt = &*std::next(SILBasicBlock::iterator(&I));
-
     // For all other (reference counted value, ref count state) we are
     // tracking...
     for (auto &OtherState : BBState.getBottomupStates()) {
@@ -290,7 +282,7 @@ bool ARCSequenceDataflowEvaluator::processBBBottomUp(
       if (Op && OtherState->first == Op)
         continue;
 
-      OtherState->second.updateForSameLoopInst(&I, InsertPt, AA);
+      OtherState->second.updateForSameLoopInst(&I, SetFactory, AA);
     }
   }
 
@@ -310,13 +302,13 @@ bool ARCSequenceDataflowEvaluator::processBBBottomUp(
     PredTerminators.push_back(TermInst);
   }
 
-  auto *InsertPt = &*BB.begin();
   for (auto &OtherState : BBState.getBottomupStates()) {
     // If the other state's value is blotted, skip it.
     if (!OtherState.hasValue())
       continue;
 
-    OtherState->second.updateForPredTerminators(PredTerminators, InsertPt, AA);
+    OtherState->second.updateForPredTerminators(PredTerminators,
+                                                SetFactory, AA);
   }
 
   return NestingDetected;
@@ -407,7 +399,7 @@ ARCSequenceDataflowEvaluator::ARCSequenceDataflowEvaluator(
     BlotMapVector<SILInstruction *, TopDownRefCountState> &DecToIncStateMap,
     BlotMapVector<SILInstruction *, BottomUpRefCountState> &IncToDecStateMap)
     : F(F), AA(AA), POA(POA), RCIA(RCIA), DecToIncStateMap(DecToIncStateMap),
-      IncToDecStateMap(IncToDecStateMap),
+      IncToDecStateMap(IncToDecStateMap), Allocator(), SetFactory(Allocator),
       // We use a malloced pointer here so we don't need to expose
       // ARCBBStateInfo in the header.
       BBStateInfo(new ARCBBStateInfo(&F, POA, PTFI)),

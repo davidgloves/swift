@@ -32,30 +32,30 @@ func foo() {
   _  = BOOLtoBOOL as (Bool) -> Bool
   _  = DummyClass().boolProperty.onlyOnBool() as Bool
 
-  _  = arrayToArray as (Array<AnyObject>!) -> (Array<AnyObject>!)
+  _  = arrayToArray as (Array<Any>!) -> (Array<Any>!)
   DummyClass().arrayProperty.onlyOnArray()
 
-  _ = dictToDict as (Dictionary<NSObject, AnyObject>!) -> Dictionary<NSObject, AnyObject>!
+  _ = dictToDict as (Dictionary<AnyHashable, Any>!) -> Dictionary<AnyHashable, Any>!
 
   DummyClass().dictProperty.onlyOnDictionary()
 
-  _ = setToSet as (Set<NSObject>!) -> Set<NSObject>!
+  _ = setToSet as (Set<AnyHashable>!) -> Set<AnyHashable>!
   DummyClass().setProperty.onlyOnSet()
 }
 
-func allocateMagic(zone: NSZone) -> UnsafeMutablePointer<Void> {
+func allocateMagic(_ zone: NSZone) -> UnsafeMutableRawPointer {
   return allocate(zone)
 }
 
-func constPointerToObjC(objects: [AnyObject?]) -> NSArray {
+func constPointerToObjC(_ objects: [AnyObject]) -> NSArray {
   return NSArray(objects: objects, count: objects.count)
 }
 
-func mutablePointerToObjC(path: String) throws -> NSString {
+func mutablePointerToObjC(_ path: String) throws -> NSString {
   return try NSString(contentsOfFile: path)
 }
 
-func objcStructs(s: StructOfNSStrings, sb: StructOfBlocks) {
+func objcStructs(_ s: StructOfNSStrings, sb: StructOfBlocks) {
   // Struct fields must not be bridged.
   _ = s.nsstr! as Bool // expected-error {{cannot convert value of type 'Unmanaged<NSString>' to type 'Bool' in coercion}}
 

@@ -1,15 +1,15 @@
-// RUN: %target-swift-frontend -emit-silgen -sdk %S/Inputs -I %S/Inputs -enable-source-import %s | FileCheck %s
+// RUN: %target-swift-frontend -emit-silgen -sdk %S/Inputs -I %S/Inputs -enable-source-import %s | %FileCheck %s
 
 // REQUIRES: objc_interop
 
 import Foundation
 
 class Butt: NSObject {
-  dynamic func butt(b: Int -> Int) {}
+  dynamic func butt(_ b: (Int) -> Int) {}
 }
 
 class Tubb<GenericParamName>: Butt {
-  override func butt(b: Int -> Int) {
+  override func butt(_ b: (Int) -> Int) {
     super.butt(b)
   }
 }

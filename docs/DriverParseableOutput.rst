@@ -5,6 +5,8 @@ Parseable Driver Output
 .. contents::
    :local:
 
+.. highlight:: none
+
 Introduction
 ============
 
@@ -57,7 +59,7 @@ Example::
      "kind": "began",
      "name": "compile",
      "pid": 12345,
-     "inputs": [ "/src/foo.swift" ],
+     "inputs": ["/src/foo.swift"],
      "outputs": [
         {
           "type": "object",
@@ -126,7 +128,7 @@ Example::
    {
      "kind": "skipped",
      "name": "compile",
-     "inputs": [ "/src/foo.swift" ],
+     "inputs": ["/src/foo.swift"],
      "outputs": [
         {
           "type": "object",

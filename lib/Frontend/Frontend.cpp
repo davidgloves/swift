@@ -229,8 +229,11 @@ Module *CompilerInstance::getMainModule() {
     MainModule = Module::create(ID, *Context);
     if (Invocation.getFrontendOptions().EnableTesting)
       MainModule->setTestingEnabled();
+
     if (Invocation.getFrontendOptions().EnableResilience)
-      MainModule->setResilienceEnabled();
+      MainModule->setResilienceStrategy(ResilienceStrategy::Resilient);
+    else if (Invocation.getFrontendOptions().SILSerializeAll)
+      MainModule->setResilienceStrategy(ResilienceStrategy::Fragile);
   }
   return MainModule;
 }
@@ -273,6 +276,20 @@ void CompilerInstance::performSema() {
       return;
     }
 
+    const auto &silOptions = Invocation.getSILOptions();
+    if ((silOptions.Optimization <= SILOptions::SILOptMode::None &&
+         (options.RequestedAction == FrontendOptions::EmitObject ||
+          options.RequestedAction == FrontendOptions::Immediate ||
+          options.RequestedAction == FrontendOptions::EmitSIL)) ||
+        (silOptions.Optimization == SILOptions::SILOptMode::None &&
+         options.RequestedAction >= FrontendOptions::EmitSILGen)) {
+      // Implicitly import the SwiftOnoneSupport module in non-optimized
+      // builds. This allows for use of popular specialized functions
+      // from the standard library, which makes the non-optimized builds
+      // execute much faster.
+      Invocation.getFrontendOptions()
+                .ImplicitImportModuleNames.push_back(SWIFT_ONONE_SUPPORT);
+    }
     break;
   }
   }
@@ -413,6 +430,12 @@ void CompilerInstance::performSema() {
     if (BufferID == PrimaryBufferID)
       setPrimarySourceFile(NextInput);
 
+    auto &Diags = NextInput->getASTContext().Diags;
+    auto DidSuppressWarnings = Diags.getSuppressWarnings();
+    auto IsPrimary
+      = PrimaryBufferID == NO_SUCH_BUFFER || BufferID == PrimaryBufferID;
+    Diags.setSuppressWarnings(DidSuppressWarnings || !IsPrimary);
+
     bool Done;
     do {
       // Parser may stop at some erroneous constructions like #else, #endif
@@ -420,6 +443,8 @@ void CompilerInstance::performSema() {
       parseIntoSourceFile(*NextInput, BufferID, &Done, nullptr,
                           &PersistentState, DelayedCB.get());
     } while (!Done);
+
+    Diags.setSuppressWarnings(DidSuppressWarnings);
 
     performNameBinding(*NextInput);
   }
@@ -440,10 +465,10 @@ void CompilerInstance::performSema() {
   if (PrimaryBufferID == NO_SUCH_BUFFER) {
     TypeCheckOptions |= TypeCheckingFlags::DelayWholeModuleChecking;
   }
-  if (Invocation.getFrontendOptions().DebugTimeFunctionBodies) {
+  if (options.DebugTimeFunctionBodies) {
     TypeCheckOptions |= TypeCheckingFlags::DebugTimeFunctionBodies;
   }
-  if (Invocation.getFrontendOptions().actionIsImmediate()) {
+  if (options.actionIsImmediate()) {
     TypeCheckOptions |= TypeCheckingFlags::ForImmediateMode;
   }
 
@@ -454,6 +479,11 @@ void CompilerInstance::performSema() {
 
     SourceFile &MainFile =
       MainModule->getMainSourceFile(Invocation.getSourceFileKind());
+
+    auto &Diags = MainFile.getASTContext().Diags;
+    auto DidSuppressWarnings = Diags.getSuppressWarnings();
+    Diags.setSuppressWarnings(DidSuppressWarnings || !mainIsPrimary);
+
     SILParserState SILContext(TheSILModule.get());
     unsigned CurTUElem = 0;
     bool Done;
@@ -467,10 +497,13 @@ void CompilerInstance::performSema() {
                           &PersistentState, DelayedCB.get());
       if (mainIsPrimary) {
         performTypeChecking(MainFile, PersistentState.getTopLevelContext(),
-                            TypeCheckOptions, CurTUElem);
+                            TypeCheckOptions, CurTUElem,
+                            options.WarnLongFunctionBodies);
       }
       CurTUElem = MainFile.Decls.size();
     } while (!Done);
+
+    Diags.setSuppressWarnings(DidSuppressWarnings);
     
     if (mainIsPrimary && !Context->hadError() &&
         Invocation.getFrontendOptions().PlaygroundTransform)
@@ -484,7 +517,8 @@ void CompilerInstance::performSema() {
     if (auto SF = dyn_cast<SourceFile>(File))
       if (PrimaryBufferID == NO_SUCH_BUFFER || SF == PrimarySourceFile)
         performTypeChecking(*SF, PersistentState.getTopLevelContext(),
-                            TypeCheckOptions);
+                            TypeCheckOptions, /*curElem*/0,
+                            options.WarnLongFunctionBodies);
 
   // Even if there were no source files, we should still record known
   // protocols.
@@ -502,6 +536,11 @@ void CompilerInstance::performSema() {
       if (auto SF = dyn_cast<SourceFile>(File))
         performWholeModuleTypeChecking(*SF);
   }
+
+  for (auto File : MainModule->getFiles())
+    if (auto SF = dyn_cast<SourceFile>(File))
+      if (PrimaryBufferID == NO_SUCH_BUFFER || SF == PrimarySourceFile)
+        finishTypeChecking(*SF);
 }
 
 void CompilerInstance::performParseOnly() {
@@ -509,7 +548,8 @@ void CompilerInstance::performParseOnly() {
   Module *MainModule = getMainModule();
   Context->LoadedModules[MainModule->getName()] = MainModule;
 
-  assert(Kind == InputFileKind::IFK_Swift || Kind == InputFileKind::IFK_Swift_Library);
+  assert((Kind == InputFileKind::IFK_Swift || Kind == InputFileKind::IFK_Swift_Library) &&
+    "only supports parsing a single .swift file");
   assert(BufferIDs.size() == 1 && "only supports parsing a single file");
 
   if (Kind == InputFileKind::IFK_Swift)

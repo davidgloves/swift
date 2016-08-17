@@ -27,11 +27,11 @@ namespace swift {
   class CanType;
   class FuncDecl;
   struct SILDeclRef;
+  class SILFunction;
   class SILType;
   class Substitution;
 
 namespace irgen {
-  class AbstractCallee;
   class CallEmission;
   class IRGenFunction;
   class IRGenModule;

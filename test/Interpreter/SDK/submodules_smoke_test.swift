@@ -8,10 +8,12 @@
 import OpenGL.GL3
 _ = glGetString
 _ = OpenGL.glGetString
+_ = GL_COLOR_BUFFER_BIT
+_ = OpenGL.GL_COLOR_BUFFER_BIT
 
 import AppKit.NSPanGestureRecognizer
 
-@available(OSX, introduced=10.10)
+@available(OSX, introduced: 10.10)
 typealias PanRecognizer = NSPanGestureRecognizer
 typealias PanRecognizer2 = AppKit.NSPanGestureRecognizer
 

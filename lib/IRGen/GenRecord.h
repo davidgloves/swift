@@ -25,6 +25,7 @@
 #include "LoadableTypeInfo.h"
 #include "TypeInfo.h"
 #include "StructLayout.h"
+#include "llvm/Support/TrailingObjects.h"
 
 namespace swift {
 namespace irgen {
@@ -80,6 +81,10 @@ public:
     return Layout.getByteOffset();
   }
 
+  unsigned getNonFixedElementIndex() const {
+    return Layout.getNonFixedElementIndex();
+  }
+
   std::pair<unsigned, unsigned> getProjectionRange() const {
     return {Begin, End};
   }
@@ -88,19 +93,15 @@ public:
 /// A metaprogrammed TypeInfo implementation for record types.
 template <class Impl, class Base, class FieldImpl_,
           bool IsLoadable = std::is_base_of<LoadableTypeInfo, Base>::value>
-class RecordTypeInfoImpl : public Base {
+class RecordTypeInfoImpl : public Base,
+    private llvm::TrailingObjects<Impl, FieldImpl_> {
+  friend class llvm::TrailingObjects<Impl, FieldImpl_>;
+
 public:
   typedef FieldImpl_ FieldImpl;
 
 private:
   const unsigned NumFields;
-
-  const FieldImpl *getFieldsBuffer() const {
-    return reinterpret_cast<const FieldImpl*>(static_cast<const Impl*>(this)+1);
-  }
-  FieldImpl *getFieldsBuffer() {
-    return reinterpret_cast<FieldImpl*>(static_cast<Impl*>(this)+1);
-  }
 
 protected:
   const Impl &asImpl() const { return *static_cast<const Impl*>(this); }
@@ -109,20 +110,20 @@ protected:
   RecordTypeInfoImpl(ArrayRef<FieldImpl> fields, As&&...args)
       : Base(std::forward<As>(args)...), NumFields(fields.size()) {
     std::uninitialized_copy(fields.begin(), fields.end(),
-                            getFieldsBuffer());
+                            this->template getTrailingObjects<FieldImpl>());
   }
 
 public:
   /// Allocate and initialize a type info of this type.
   template <class... As>
   static Impl *create(ArrayRef<FieldImpl> fields, As &&...args) {
-    void *buffer =
-      ::operator new(sizeof(Impl) + fields.size() * sizeof(FieldImpl));
+    size_t size = Impl::template totalSizeToAlloc<FieldImpl>(fields.size());
+    void *buffer = ::operator new(size);
     return new(buffer) Impl(fields, std::forward<As>(args)...);
   }
 
   ArrayRef<FieldImpl> getFields() const {
-    return ArrayRef<FieldImpl>(getFieldsBuffer(), NumFields);
+    return {this->template getTrailingObjects<FieldImpl>(), NumFields};
   }
 
   /// The standard schema is just all the fields jumbled together.
@@ -422,6 +423,21 @@ private:
     }
   }
 
+  template <void (LoadableTypeInfo::*Op)(IRGenFunction &IGF, Address addr,
+                                         Explosion &out, Atomicity atomicity) const>
+  void forAllFields(IRGenFunction &IGF, Address addr, Explosion &out,
+                    Atomicity atomicity) const {
+    auto offsets = asImpl().getNonFixedOffsets(IGF);
+    for (auto &field : getFields()) {
+      if (field.isEmpty()) continue;
+
+      Address fieldAddr = field.projectAddress(IGF, addr, offsets);
+      (cast<LoadableTypeInfo>(field.getTypeInfo()).*Op)(IGF, fieldAddr, out,
+                                                        atomicity);
+    }
+  }
+
+
   template <void (LoadableTypeInfo::*Op)(IRGenFunction &IGF,
                                          Explosion &in,
                                          Address addr) const>
@@ -468,14 +484,17 @@ public:
   }
 
   void copy(IRGenFunction &IGF, Explosion &src,
-            Explosion &dest) const override {
+            Explosion &dest, Atomicity atomicity) const override {
     for (auto &field : getFields())
-      cast<LoadableTypeInfo>(field.getTypeInfo()).copy(IGF, src, dest);
+      cast<LoadableTypeInfo>(field.getTypeInfo())
+          .copy(IGF, src, dest, Atomicity::Atomic);
   }
-      
-  void consume(IRGenFunction &IGF, Explosion &src) const override {
+
+  void consume(IRGenFunction &IGF, Explosion &src,
+               Atomicity atomicity) const override {
     for (auto &field : getFields())
-      cast<LoadableTypeInfo>(field.getTypeInfo()).consume(IGF, src);
+      cast<LoadableTypeInfo>(field.getTypeInfo())
+          .consume(IGF, src, Atomicity::Atomic);
   }
 
   void fixLifetime(IRGenFunction &IGF, Explosion &src) const override {

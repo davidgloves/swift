@@ -94,7 +94,7 @@ bool ArrayAllocation::mapInitializationStores() {
 
   // Match initialization stores.
   // %83 = struct_extract %element_buffer : $UnsafeMutablePointer<Int>
-  // %84 = pointer_to_address %83 : $Builtin.RawPointer to $*Int
+  // %84 = pointer_to_address %83 : $Builtin.RawPointer to strict $*Int
   // store %85 to %84 : $*Int
   // %87 = integer_literal $Builtin.Word, 1
   // %88 = index_addr %84 : $*Int, %87 : $Builtin.Word
@@ -188,19 +188,6 @@ bool ArrayAllocation::analyseArrayValueUses() {
   return recursivelyCollectUses(ArrayValue);
 }
 
-static bool doesNotChangeArray(ArraySemanticsCall &C) {
-  switch (C.getKind()) {
-  default: return false;
-  case ArrayCallKind::kArrayPropsIsNativeTypeChecked:
-  case ArrayCallKind::kCheckSubscript:
-  case ArrayCallKind::kCheckIndex:
-  case ArrayCallKind::kGetCount:
-  case ArrayCallKind::kGetCapacity:
-  case ArrayCallKind::kGetElement:
-    return true;
-  }
-}
-
 /// Recursively look at all uses of this definition. Abort if the array value
 /// could escape or be changed. Collect all uses that are calls to array.count.
 bool ArrayAllocation::recursivelyCollectUses(ValueBase *Def) {
@@ -219,7 +206,7 @@ bool ArrayAllocation::recursivelyCollectUses(ValueBase *Def) {
 
     // Check array semantic calls.
     ArraySemanticsCall ArrayOp(User);
-    if (ArrayOp && doesNotChangeArray(ArrayOp)) {
+    if (ArrayOp && ArrayOp.doesNotChangeArray()) {
       if (ArrayOp.getKind() == ArrayCallKind::kGetElement)
         GetElementCalls.insert(ArrayOp);
       continue;

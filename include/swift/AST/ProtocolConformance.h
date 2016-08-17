@@ -22,6 +22,7 @@
 #include "swift/AST/Substitution.h"
 #include "swift/AST/Type.h"
 #include "swift/AST/Types.h"
+#include "swift/AST/TypeAlignments.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/FoldingSet.h"
@@ -93,12 +94,19 @@ class alignas(1 << DeclAlignInBits) ProtocolConformance {
   /// The kind of protocol conformance.
   ProtocolConformanceKind Kind;
 
-  /// \brief The type that conforms to the protocol.
+  /// \brief The type that conforms to the protocol, in the context of the
+  /// conformance definition.
   Type ConformingType;
+  
+  /// \brief The interface type that conforms to the protocol.
+  Type ConformingInterfaceType;
+  
 
 protected:
-  ProtocolConformance(ProtocolConformanceKind kind, Type conformingType)
-    : Kind(kind), ConformingType(conformingType) { }
+  ProtocolConformance(ProtocolConformanceKind kind, Type conformingType,
+                      Type conformingInterfaceType)
+    : Kind(kind), ConformingType(conformingType),
+      ConformingInterfaceType(conformingInterfaceType) { }
 
 public:
   /// Determine the kind of protocol conformance.
@@ -108,7 +116,7 @@ public:
   Type getType() const { return ConformingType; }
 
   /// Get the conforming interface type.
-  Type getInterfaceType() const;
+  Type getInterfaceType() const { return ConformingInterfaceType; }
   
   /// Get the protocol being conformed to.
   ProtocolDecl *getProtocol() const;
@@ -173,6 +181,10 @@ public:
       if (!assocTypeReq || req->isInvalid())
         continue;
 
+      // If we don't have and cannot resolve witnesses, skip it.
+      if (!resolver && !hasTypeWitness(assocTypeReq))
+        continue;
+
       const auto &TWInfo = getTypeWitnessSubstAndDecl(assocTypeReq, resolver);
       if (f(assocTypeReq, TWInfo.first, TWInfo.second))
         return true;
@@ -185,6 +197,11 @@ public:
   ConcreteDeclRef getWitness(ValueDecl *requirement, 
                              LazyResolver *resolver) const;
 
+private:
+  /// Determine whether we have a witness for the given requirement.
+  bool hasWitness(ValueDecl *requirement) const;
+
+public:
   /// Apply the given function object to each value witness within this
   /// protocol conformance.
   ///
@@ -205,6 +222,10 @@ public:
       if (auto *FD = dyn_cast<FuncDecl>(valueReq))
         if (FD->isAccessor())
           continue;
+
+      // If we don't have and cannot resolve witnesses, skip it.
+      if (!resolver && !hasWitness(valueReq))
+        continue;
 
       f(valueReq, getWitness(valueReq, resolver));
     }
@@ -235,12 +256,13 @@ public:
                ->getRootNormalConformance());
   }
 
+  /// Determine whether this protocol conformance is visible from the
+  /// given declaration context.
+  bool isVisibleFrom(const DeclContext *dc) const;
+
   /// Determine whether the witness for the given requirement
   /// is either the default definition or was otherwise deduced.
-  ///
-  /// FIXME: This is a crummy API. This information should be recorded in the
-  /// witnesses themselves.
-  bool usesDefaultDefinition(ValueDecl *requirement) const;
+  bool usesDefaultDefinition(AssociatedTypeDecl *requirement) const;
   
   // Make vanilla new/delete illegal for protocol conformances.
   void *operator new(size_t bytes) = delete;
@@ -261,7 +283,14 @@ public:
   void printName(raw_ostream &os,
                  const PrintOptions &PO = PrintOptions()) const;
   
+  /// True if the conformance is for a property behavior instantiation.
+  bool isBehaviorConformance() const;
+  
+  /// Get the property declaration for a behavior conformance, if this is one.
+  AbstractStorageDecl *getBehaviorDecl() const;
+  
   void dump() const;
+  void dump(llvm::raw_ostream &out, unsigned indent = 0) const;
 
 private:
   friend class Substitution;
@@ -290,7 +319,8 @@ private:
 /// providing the witnesses \c A.foo and \c B<T>.foo, respectively, for the
 /// requirement \c foo.
 class NormalProtocolConformance : public ProtocolConformance,
-                                  public llvm::FoldingSetNode {
+                                  public llvm::FoldingSetNode
+{
   /// \brief The protocol being conformed to and its current state.
   llvm::PointerIntPair<ProtocolDecl *, 2, ProtocolConformanceState>
     ProtocolAndState;
@@ -298,11 +328,14 @@ class NormalProtocolConformance : public ProtocolConformance,
   /// The location of this protocol conformance in the source.
   SourceLoc Loc;
 
+  using Context = llvm::PointerUnion<DeclContext *, AbstractStorageDecl *>;
+
   /// The declaration context containing the ExtensionDecl or
-  /// NominalTypeDecl that declared the conformance.
+  /// NominalTypeDecl that declared the conformance, or the VarDecl whose
+  /// behavior this conformance represents.
   ///
   /// Also stores the "invalid" bit.
-  llvm::PointerIntPair<DeclContext *, 1, bool> DCAndInvalid;
+  llvm::PointerIntPair<Context, 1, bool> ContextAndInvalid;
 
   /// \brief The mapping of individual requirements in the protocol over to
   /// the declarations that satisfy those requirements.
@@ -316,10 +349,6 @@ class NormalProtocolConformance : public ProtocolConformance,
   /// the requirements of those protocols.
   InheritedConformanceMap InheritedMapping;
 
-  /// The set of requirements for which we have used default definitions or
-  /// otherwise deduced the result.
-  llvm::SmallPtrSet<ValueDecl *, 4> DefaultedDefinitions;
-
   LazyMemberLoader *Resolver = nullptr;
   uint64_t ResolverContextData;
 
@@ -328,8 +357,23 @@ class NormalProtocolConformance : public ProtocolConformance,
   NormalProtocolConformance(Type conformingType, ProtocolDecl *protocol,
                             SourceLoc loc, DeclContext *dc,
                             ProtocolConformanceState state)
-    : ProtocolConformance(ProtocolConformanceKind::Normal, conformingType),
-      ProtocolAndState(protocol, state), Loc(loc), DCAndInvalid(dc, false)
+    : ProtocolConformance(ProtocolConformanceKind::Normal, conformingType,
+                          // FIXME: interface type should be passed in
+                          dc->getDeclaredInterfaceType()),
+      ProtocolAndState(protocol, state), Loc(loc), ContextAndInvalid(dc, false)
+  {
+  }
+
+  NormalProtocolConformance(Type conformingType,
+                            Type conformingInterfaceType,
+                            ProtocolDecl *protocol,
+                            SourceLoc loc, AbstractStorageDecl *behaviorStorage,
+                            ProtocolConformanceState state)
+    : ProtocolConformance(ProtocolConformanceKind::Normal, conformingType,
+                          // FIXME: interface type should be passed in
+                          conformingInterfaceType),
+      ProtocolAndState(protocol, state), Loc(loc),
+      ContextAndInvalid(behaviorStorage, false)
   {
   }
 
@@ -344,7 +388,14 @@ public:
 
   /// Get the declaration context that contains the conforming extension or
   /// nominal type declaration.
-  DeclContext *getDeclContext() const { return DCAndInvalid.getPointer(); }
+  DeclContext *getDeclContext() const {
+    auto context = ContextAndInvalid.getPointer();
+    if (auto DC = context.dyn_cast<DeclContext *>()) {
+      return DC;
+    } else {
+      return context.get<AbstractStorageDecl *>()->getDeclContext();
+    }
+  }
 
   /// Retrieve the state of this conformance.
   ProtocolConformanceState getState() const {
@@ -357,11 +408,31 @@ public:
   }
 
   /// Determine whether this conformance is invalid.
-  bool isInvalid() const { return DCAndInvalid.getInt(); }
-
+  bool isInvalid() const {
+    return ContextAndInvalid.getInt();
+  }
+  
   /// Mark this conformance as invalid.
-  void setInvalid() { DCAndInvalid.setInt(true); }
+  void setInvalid() {
+    ContextAndInvalid.setInt(true);
+  }
 
+  /// Determine whether this conformance is lazily resolved.
+  ///
+  /// This only matters to the AST verifier.
+  bool isLazilyResolved() const { return Resolver != nullptr; }
+
+  /// True if the conformance describes a property behavior.
+  bool isBehaviorConformance() const {
+    return ContextAndInvalid.getPointer().is<AbstractStorageDecl *>();
+  }
+  
+  /// Return the declaration using the behavior for this conformance, or null
+  /// if this isn't a behavior conformance.
+  AbstractStorageDecl *getBehaviorDecl() const {
+    return ContextAndInvalid.getPointer().dyn_cast<AbstractStorageDecl *>();
+  }
+  
   /// Retrieve the type witness substitution and type decl (if one exists)
   /// for the given associated type.
   std::pair<const Substitution &, TypeDecl *>
@@ -418,24 +489,12 @@ public:
     assert(!isComplete() && "Conformance already complete?");
     InheritedMapping[proto] = conformance;
   }
-  /// Determine whether the witness for the given requirement
-  /// is either the default definition or was otherwise deduced.
-  bool usesDefaultDefinition(ValueDecl *requirement) const {
-    if (Resolver)
-      resolveLazyInfo();
-    return DefaultedDefinitions.count(requirement) > 0;
-  }
 
-  /// Retrieve the complete set of defaulted definitions.
-  const llvm::SmallPtrSet<ValueDecl *, 4> &getDefaultedDefinitions() const {
-    if (Resolver)
-      resolveLazyInfo();
-    return DefaultedDefinitions;
-  }
-
-  /// Note that the given requirement was a default definition.
-  void addDefaultDefinition(ValueDecl *requirement) {
-    DefaultedDefinitions.insert(requirement);
+  /// Determine whether the witness for the given type requirement
+  /// is the default definition.
+  bool usesDefaultDefinition(AssociatedTypeDecl *requirement) const {
+    return getTypeWitnessSubstAndDecl(requirement, nullptr)
+        .second->isImplicit();
   }
 
   void setLazyLoader(LazyMemberLoader *resolver, uint64_t contextData);
@@ -542,7 +601,7 @@ public:
 
   /// Determine whether the witness for the given requirement
   /// is either the default definition or was otherwise deduced.
-  bool usesDefaultDefinition(ValueDecl *requirement) const {
+  bool usesDefaultDefinition(AssociatedTypeDecl *requirement) const {
     return GenericConformance->usesDefaultDefinition(requirement);
   }
 
@@ -586,8 +645,9 @@ class InheritedProtocolConformance : public ProtocolConformance,
 
   InheritedProtocolConformance(Type conformingType,
                                ProtocolConformance *inheritedConformance)
-    : ProtocolConformance(ProtocolConformanceKind::Inherited,
-                          conformingType),
+    : ProtocolConformance(ProtocolConformanceKind::Inherited, conformingType,
+            // FIXME: interface type should be passed in
+            inheritedConformance->getDeclContext()->getDeclaredInterfaceType()),
       InheritedConformance(inheritedConformance)
   {
   }
@@ -606,7 +666,11 @@ public:
   /// Get the declaration context that contains the conforming extension or
   /// nominal type declaration.
   DeclContext *getDeclContext() const {
-    return InheritedConformance->getDeclContext();
+    auto bgc = getType()->getClassOrBoundGenericClass();
+
+    // In some cases, we may not have a BGC handy, in which case we should
+    // delegate to the inherited conformance for the decl context.
+    return bgc ? bgc : InheritedConformance->getDeclContext();
   }
 
   /// Retrieve the state of this conformance.
@@ -640,7 +704,7 @@ public:
 
   /// Determine whether the witness for the given requirement
   /// is either the default definition or was otherwise deduced.
-  bool usesDefaultDefinition(ValueDecl *requirement) const {
+  bool usesDefaultDefinition(AssociatedTypeDecl *requirement) const {
     return InheritedConformance->usesDefaultDefinition(requirement);
   }
 
@@ -661,6 +725,10 @@ public:
 
 inline bool ProtocolConformance::isInvalid() const {
   return getRootNormalConformance()->isInvalid();
+}
+
+inline bool ProtocolConformance::hasWitness(ValueDecl *requirement) const {
+  return getRootNormalConformance()->hasWitness(requirement);
 }
 
 } // end namespace swift
